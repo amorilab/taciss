@@ -40,7 +40,7 @@ import urllib.error
 import urllib.request
 from urllib.parse import parse_qs, quote, urlencode, urlparse
 
-VERSION = "1.0.1"
+VERSION = "1.1.0"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 
