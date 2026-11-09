@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="app/static/logo-512.png" alt="TACISS" width="220">
+</p>
+
 # TACISS — self-hosted
 
 **Tactical Communications & Incident Situational Sharing.** This is an incident and information-sharing board for emergency management and auxiliary communications groups (ARES, RACES, Skywarn, CERT). It runs on your own Debian 13 machine and keeps working without internet. When you want, you can also put it online at your own domain.
