@@ -50,8 +50,15 @@ jobs:
           DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends python3 systemd ca-certificates >/dev/null
           . /etc/os-release && echo "$PRETTY_NAME, $(python3 --version)"
       - uses: actions/checkout@v4
-      - name: Install like a real server
-        run: bash deploy/install.sh
+      - name: Install like a real server (root via plain "su", which leaves /usr/sbin off PATH)
+        run: env -i HOME=/root TERM=dumb PATH=/usr/local/bin:/usr/bin:/bin bash deploy/install.sh
+      - name: Reinstall as a normal user with sudo (the INSTALL.md path)
+        run: |
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends sudo >/dev/null
+          useradd -m -G sudo alice && echo 'alice ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/alice
+          cp -r "$PWD" /home/alice/taciss && chown -R alice /home/alice/taciss
+          runuser -u alice -- env -i HOME=/home/alice PATH=/usr/local/bin:/usr/bin:/bin \
+            bash -c 'cd ~/taciss && sudo bash deploy/install.sh && sudo taciss setup-code --quiet'
       - name: Server starts and answers
         run: |
           runuser -u taciss -- env TACISS_DATA=/var/lib/taciss python3 /opt/taciss/app/taciss.py serve --port 8080 > /tmp/taciss.log 2>&1 &

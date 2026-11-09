@@ -68,7 +68,7 @@ Need to install where there's **no internet at all**? Build the 4 GB offline DVD
 
 ## C. Existing Debian 13 machine
 
-**You need:** a machine running **Debian 13 (trixie)** and a user who can run `sudo`. (Raspberry Pi OS and Ubuntu are Debian-based and work too.)
+**You need:** a machine running **Debian 13 (trixie)** that's connected to the internet for the download. (Raspberry Pi OS and Ubuntu are Debian-based and work too.)
 
 1. **Check the Debian version:**
 
@@ -78,18 +78,41 @@ Need to install where there's **no internet at all**? Build the 4 GB offline DVD
 
    It should say `13.something`.
 
-2. **Download and unpack TACISS.** Copy and paste these lines. Replace `1.0.0` with the newest version from the [Releases page](https://github.com/amorilab/taciss/releases/latest):
+2. **Make sure you can use `sudo` and `wget`.** Run:
+
+   ```bash
+   sudo true && command -v wget
+   ```
+
+   If it prints `/usr/bin/wget`, skip to step 3. Otherwise (for example `sudo: command not found`, `is not in the sudoers file`, or nothing printed), fix it once:
+
+   ```bash
+   su -
+   ```
+
+   Type the **root** password you chose when installing Debian. Then run these two lines, using your own login name in place of `yourname`:
+
+   ```bash
+   apt update && apt install -y sudo wget
+   usermod -aG sudo yourname
+   ```
+
+   Type `exit`, then **log out and back in** (or reboot) so the change takes effect.
+
+   Don't want to set up `sudo`? You can stay in `su -` and run the commands below without the word `sudo`.
+
+3. **Download and unpack TACISS.** Copy and paste these lines. Replace `1.0.1` with the newest version from the [Releases page](https://github.com/amorilab/taciss/releases/latest):
 
    ```bash
    cd ~
-   wget https://github.com/amorilab/taciss/releases/download/v1.0.0/taciss-1.0.0.tar.gz
-   tar xzf taciss-1.0.0.tar.gz
-   cd taciss-1.0.0
+   wget https://github.com/amorilab/taciss/releases/download/v1.0.1/taciss-1.0.1.tar.gz
+   tar xzf taciss-1.0.1.tar.gz
+   cd taciss-1.0.1
    ```
 
    No internet on that machine? Download the `.tar.gz` on another computer and copy it over with a USB stick.
 
-3. **Install:**
+4. **Install:**
 
    ```bash
    sudo bash deploy/install.sh
@@ -97,7 +120,7 @@ Need to install where there's **no internet at all**? Build the 4 GB offline DVD
 
    At the end it offers to create the admin account right there. You can also leave it blank and use the setup code it prints.
 
-4. **Open** the address it prints, for example `http://192.168.1.50:8080`, from any device on the network.
+5. **Open** the address it prints, for example `http://192.168.1.50:8080`, from any device on the network.
 
 If the machine has a firewall (`ufw`) turned on, open the ports:
 

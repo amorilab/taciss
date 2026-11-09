@@ -7,6 +7,8 @@
 #
 # Your data and settings are kept, and the database is backed up first.
 set -euo pipefail
+# "su" (without "-") leaves out /usr/sbin, where useradd and runuser live
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
 
 set -a; [[ -r /etc/taciss/taciss.env ]] && . /etc/taciss/taciss.env; set +a
 REPO="${TACISS_REPO:-amorilab/taciss}"

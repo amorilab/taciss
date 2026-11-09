@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Wrapper so admins can run: sudo taciss create-user bob --role operator
 set -euo pipefail
+# "su" (without "-") leaves out /usr/sbin, where useradd and runuser live
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
 set -a; [[ -r /etc/taciss/taciss.env ]] && . /etc/taciss/taciss.env; set +a
 export TACISS_DATA="${TACISS_DATA:-/var/lib/taciss}"
 if [[ "${1:-}" == update ]]; then shift; exec /usr/local/sbin/taciss-update "$@"; fi

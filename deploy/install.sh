@@ -6,11 +6,13 @@
 #   ./deploy/install.sh --no-start        # used by the TACISS ISO inside the installer chroot
 #
 set -euo pipefail
+# "su" (without "-") leaves out /usr/sbin, where useradd and runuser live
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
 
 NO_START=0
 [[ "${1:-}" == "--no-start" ]] && NO_START=1
 
-[[ $EUID -eq 0 ]] || { echo "Please run as root: sudo $0" >&2; exit 1; }
+[[ $EUID -eq 0 ]] || { echo "Please run as root: sudo bash $0   (no sudo? run: su -   then: bash $0)" >&2; exit 1; }
 if [[ $NO_START == 0 && ! -d /run/systemd/system ]]; then
   echo "==> systemd isn't running here (chroot or container): installing without starting the service"
   NO_START=1
