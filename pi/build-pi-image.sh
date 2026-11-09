@@ -91,8 +91,9 @@ if [[ -d "$MNT/boot/firmware" ]]; then BOOT="$MNT/boot/firmware"; else BOOT="$MN
 mount "${LOOP}p1" "$BOOT"
 [[ -f "$MNT/etc/os-release" ]] || die "image has no /etc/os-release - is it Raspberry Pi OS?"
 grep -q '^ID=debian\|^ID_LIKE=debian\|^ID=raspbian' "$MNT/etc/os-release" || die "image isn't Debian-based"
-. "$MNT/etc/os-release"
-say "Base: $PRETTY_NAME"
+# (read just the name - sourcing os-release would overwrite our VERSION variable)
+BASE_NAME=$(grep -m1 '^PRETTY_NAME=' "$MNT/etc/os-release" | cut -d= -f2- | tr -d '"')
+say "Base: $BASE_NAME"
 
 # ---------------------------------------------------------------- add TACISS
 say "Adding TACISS $VERSION"
@@ -114,7 +115,7 @@ sed -i 's/\braspberrypi\b/taciss/g' "$MNT/etc/hosts"
 # Instructions you can read by putting the card in any computer
 sed "s/@VERSION@/$VERSION/" "$HERE/TACISS-README.txt" | sed 's/$/\r/' > "$BOOT/TACISS-README.txt"
 
-echo "TACISS $VERSION built $(date -u +%Y-%m-%dT%H:%MZ) from $PRETTY_NAME" > "$MNT/opt/taciss-src/BUILD-INFO"
+echo "TACISS $VERSION built $(date -u +%Y-%m-%dT%H:%MZ) from $BASE_NAME" > "$MNT/opt/taciss-src/BUILD-INFO"
 df -h "$MNT" | tail -1 | awk '{print "    root filesystem: " $4 " free"}'
 
 sync
@@ -124,6 +125,7 @@ losetup -d "$LOOP"
 LOOP=""
 
 # ---------------------------------------------------------------- compress
+[[ "$VERSION" =~ ^[0-9]+(.[0-9]+)*$ ]] || die "bad version: $VERSION"
 OUT="$DIST/taciss-$VERSION-raspberrypi-arm64.img.xz"
 say "Compressing to $OUT"
 rm -f "$OUT" "$OUT.sha256"
