@@ -15,7 +15,7 @@ def check(name, cond, extra=""):
 
 
 def start(n):
-    env = dict(os.environ, TACISS_DATA=dirs[n])
+    env = dict(os.environ, TACISS_DATA=dirs[n], TACISS_APRS="0")
     logs[n] = open(os.path.join(dirs[n], "server.log"), "a")
     procs[n] = subprocess.Popen([sys.executable, "-u", APP, "serve", "--port", str(NODES[n]), "--host", "127.0.0.1"],
                                 env=env, stdout=logs[n], stderr=subprocess.STDOUT)

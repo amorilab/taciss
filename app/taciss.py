@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-TACISS - Tactical Communications & Incident Situational Sharing
+TACISS - Tactical Amateur Communication Information Sharing System
 Self-hosted edition. Pure Python 3 standard library (no pip installs),
 so it runs on a stock Debian 13 box with zero internet access.
 
@@ -13,6 +13,7 @@ so it runs on a stock Debian 13 box with zero internet access.
 Configuration is via environment variables (see deploy/taciss.env).
 """
 import argparse
+import collections
 import csv
 import getpass
 import gzip
@@ -37,7 +38,7 @@ from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import urllib.error
 import urllib.request
-from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.parse import parse_qs, quote, urlencode, urlparse
 
 VERSION = "1.0.1"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -65,6 +66,8 @@ CONFIG = {
     # GitHub repo for `taciss update` and the "new version available" notice; 0 turns the daily check off.
     "repo": os.environ.get("TACISS_REPO", "amorilab/taciss"),
     "update_check": env_bool("TACISS_UPDATE_CHECK", True),
+    # APRS-IS live feed (also needs aprs_enabled=1 in settings); 0 keeps the server off APRS-IS entirely.
+    "aprs": env_bool("TACISS_APRS", True),
 }
 
 ROLE_RANK = {"viewer": 1, "operator": 2, "admin": 3}
@@ -259,7 +262,7 @@ ENTITIES = {
 
 SETTINGS_DEFAULTS = {
     "site_name": "TACISS",
-    "org_name": "Tactical Communications & Incident Situational Sharing",
+    "org_name": "Tactical Amateur Communication Information Sharing System",
     "seoc_level": "normal",  # normal | monitoring | partial | full
     "banner": "",
     "map_lat": "35.86", "map_lon": "-86.35", "map_zoom": "7",
@@ -293,8 +296,15 @@ SETTINGS_DEFAULTS = {
     "mesh_url": "",                 # address other nodes use to reach this one, e.g. http://10.54.3.21:8080
     "mesh_interval": "30",          # seconds between background syncs (changes also sync right away)
     "mesh_discoverable": "1",       # announce this node on the LAN / answer discovery probes
+    # APRS: live APRS-IS feed around the map center, aprs.fi lookups, sending under users' own callsigns
+    "aprs_enabled": "1",
+    "aprs_server": "rotate.aprs2.net:14580",  # APRS-IS server (filtered port)
+    "aprs_range_km": "150",         # radius around the map center to receive
+    "aprs_filter_extra": "",        # advanced: extra APRS-IS filter terms, e.g. "p/W4 t/w"
+    "aprsfi_api_key": "",           # free key from aprs.fi (Account -> API key) for callsign lookups
+    "aprs_tx_enabled": "1",         # let users send positions/objects/messages under their own callsign
 }
-SECRET_SETTINGS = {"windy_api_key", "tdot_api_key"}  # never sent back to browsers
+SECRET_SETTINGS = {"windy_api_key", "tdot_api_key", "aprsfi_api_key"}  # never sent back to browsers
 SECRET_MASK = "••••••••"
 SEOC_LEVELS = ["normal", "monitoring", "partial", "full"]
 SETTINGS_OPERATOR_KEYS = {"seoc_level", "banner"}
@@ -428,6 +438,9 @@ def init_db():
         con.execute("UPDATE incidents SET visibility = 'open' WHERE visibility IS NULL")
         for k, v in SETTINGS_DEFAULTS.items():
             con.execute("INSERT OR IGNORE INTO settings(key, value) VALUES (?, ?)", (k, v))
+        # 1.1: the name changed; update servers still showing the old default (custom subtitles are kept)
+        con.execute("UPDATE settings SET value = ? WHERE key = 'org_name' AND value = ?",
+                    (SETTINGS_DEFAULTS["org_name"], "Tactical Communications & Incident Situational Sharing"))
         mesh_init(con)
         con.execute("DELETE FROM sessions WHERE expires_at < ?", (time.time(),))
         con.commit()
@@ -1194,6 +1207,522 @@ class FeedService:
 
 
 FEEDS = FeedService()
+
+
+# --------------------------------------------------------------------------
+# APRS: live APRS-IS feed for the area, aprs.fi lookups, and sending packets
+# (positions, objects, messages) into APRS-IS under a user's own callsign.
+# aprs.fi shows whatever flows through APRS-IS, so anything sent appears there.
+# --------------------------------------------------------------------------
+APRS_TOCALL = "APZTAC"  # APZxxx = experimental software tocall
+APRS_SYMBOLS = {  # symbol (table + code) -> label, offered in the send forms
+    "/-": "House / QTH", "/>": "Car", "/[": "Person", "/k": "Truck", "/v": "Van", "/j": "Jeep",
+    "/o": "EOC", "/a": "Ambulance", "/f": "Fire truck", "/!": "Police", "/+": "Red Cross",
+    "/h": "Hospital", "/r": "Antenna", "/y": "Yagi at QTH", "/_": "Weather station", "/;": "Campground / portable",
+    "\\z": "Shelter", "\\'": "Crash site", "\\T": "Thunderstorm", "\\@": "Hurricane / storm", "\\t": "Tornado",
+    "\\F": "Flooding", "\\X": "Hazard", "/'": "Small aircraft", "/X": "Helicopter",
+}
+CALL_RE = re.compile(r"^[A-Z0-9]{1,2}[0-9][A-Z]{1,4}$")      # amateur callsign (base, no SSID)
+APRS_ADDR_RE = re.compile(r"^[A-Z0-9]{1,6}(-[0-9]{1,2})?$")  # callsign with optional SSID
+WX_WIDTHS = {"c": 3, "s": 3, "g": 3, "t": 3, "r": 3, "p": 3, "P": 3, "h": 2, "b": 5, "L": 3, "l": 3}
+
+
+def public_prefs(prefs):
+    """A user's prefs as sent to the browser: the APRS passcode never leaves the server."""
+    out = {k: v for k, v in prefs.items() if k != "aprs_passcode"}
+    out["aprs_passcode_set"] = bool(prefs.get("aprs_passcode"))
+    return out
+
+
+def aprs_passcode(call):
+    """The standard APRS-IS passcode for a callsign (SSID ignored)."""
+    h = 0x73E2
+    c = call.upper().split("-")[0]
+    for i in range(0, len(c), 2):
+        h ^= ord(c[i]) << 8
+        if i + 1 < len(c):
+            h ^= ord(c[i + 1])
+    return h & 0x7FFF
+
+
+def _b91(s):
+    v = 0
+    for ch in s:
+        v = v * 91 + ord(ch) - 33
+    return v
+
+
+def _wx_fields(s):
+    """Parse APRS weather fields ('c220s004g005t077r000...'). Returns (dict, rest of text)."""
+    out, i = {}, 0
+    while i < len(s) and s[i] in WX_WIDTHS:
+        k, w = s[i], WX_WIDTHS[s[i]]
+        val = s[i + 1:i + 1 + w]
+        if not re.fullmatch(r"-?\d+|[ .]+", val or "x"):
+            break
+        if val.strip(" .") not in ("", "-"):
+            n = int(val)
+            out.update({"c": {"wind_dir": n}, "s": {"wind_mph": n}, "g": {"gust_mph": n}, "t": {"temp_f": n},
+                        "r": {"rain_1h_in": n / 100}, "p": {"rain_24h_in": n / 100},
+                        "P": {"rain_midnight_in": n / 100}, "h": {"humidity": 100 if n == 0 else n},
+                        "b": {"pressure_mb": n / 10}, "L": {"lum_wm2": n}, "l": {"lum_wm2": n + 1000}}[k])
+        i += 1 + w
+    return out, s[i:]
+
+
+def _pos_uncompressed(b):
+    """'DDMM.mmN/DDDMM.mmW>' -> (lat, lon, symbol, rest) or None."""
+    m = re.match(r"(\d{2})([\d ]{2}\.[\d ]{2})([NS])(.)(\d{3})([\d ]{2}\.[\d ]{2})([EW])(.)", b)
+    if not m:
+        return None
+    lat = int(m[1]) + float(m[2].replace(" ", "0")) / 60
+    lon = int(m[5]) + float(m[6].replace(" ", "0")) / 60
+    lat, lon = (-lat if m[3] == "S" else lat), (-lon if m[7] == "W" else lon)
+    return lat, lon, m[4] + m[8], b[19:]
+
+
+def _pos_compressed(b):
+    if len(b) < 13 or not re.match(r"[/\\A-Za-j]", b[0]):
+        return None
+    try:
+        lat = 90 - _b91(b[1:5]) / 380926
+        lon = -180 + _b91(b[5:9]) / 190463
+    except (ValueError, IndexError):
+        return None
+    out = {"lat": lat, "lon": lon, "sym": b[0] + b[9]}
+    c, s = b[10], b[11]
+    if c != " " and 0 <= ord(c) - 33 <= 89 and ord(s) >= 33:
+        out["course"] = (ord(c) - 33) * 4
+        out["speed_kmh"] = round((1.08 ** (ord(s) - 33) - 1) * 1.852, 1)
+    return out, b[13:]
+
+
+def _comment_ext(rec, comment):
+    """Course/speed, altitude and weather hidden in a position comment."""
+    m = re.match(r"(\d{3})/(\d{3})", comment)
+    if m and rec.get("sym", "")[1:] == "_":  # weather station: wind dir/speed then wx fields
+        wx, rest = _wx_fields(comment[7:])
+        wx.update(wind_dir=int(m[1]), wind_mph=int(m[2]))
+        rec["wx"], comment = wx, rest
+    elif m:
+        if int(m[1]) or int(m[2]):
+            rec["course"], rec["speed_kmh"] = int(m[1]) % 360, round(int(m[2]) * 1.852, 1)
+        comment = comment[7:]
+    a = re.search(r"/A=(-?\d{6})", comment)
+    if a:
+        rec["alt_m"] = round(int(a[1]) * 0.3048)
+        comment = comment.replace(a[0], "")
+    rec["comment"] = comment.strip()[:200]
+    return rec
+
+
+def _position(rec, body):
+    p = _pos_uncompressed(body)
+    if p:
+        rec.update(lat=p[0], lon=p[1], sym=p[2])
+        return _comment_ext(rec, p[3])
+    c = _pos_compressed(body)
+    if c:
+        rec.update(c[0])
+        if rec["sym"][1:] == "_":  # compressed weather station: wx fields follow directly
+            rec["wx"], rest = _wx_fields(c[1])
+            rec["comment"] = rest.strip()[:200]
+            return rec
+        return _comment_ext(rec, c[1])
+    return None
+
+
+def _mic_e(rec, dst, b):
+    dst = dst.split("-")[0]
+    if len(dst) < 6 or len(b) < 8:
+        return None
+    digits = ""
+    for ch in dst[:6]:
+        if ch.isdigit():
+            digits += ch
+        elif "A" <= ch <= "J":
+            digits += str(ord(ch) - 65)
+        elif "P" <= ch <= "Y":
+            digits += str(ord(ch) - 80)
+        elif ch in "KLZ":
+            digits += "0"
+        else:
+            return None
+    lat = int(digits[:2]) + float(digits[2:4] + "." + digits[4:6]) / 60
+    north, lon_off, west = dst[3] >= "P", 100 if dst[4] >= "P" else 0, dst[5] >= "P"
+    d = ord(b[0]) - 28 + lon_off
+    if 180 <= d <= 189:
+        d -= 80
+    elif 190 <= d <= 199:
+        d -= 190
+    m = ord(b[1]) - 28
+    if m >= 60:
+        m -= 60
+    lon = d + (m + (ord(b[2]) - 28) / 100) / 60
+    sp, dc, se = ord(b[3]) - 28, ord(b[4]) - 28, ord(b[5]) - 28
+    speed, course = sp * 10 + dc // 10, (dc % 10) * 100 + se
+    speed -= 800 if speed >= 800 else 0
+    course -= 400 if course >= 400 else 0
+    if not (-90 <= lat <= 90 and 0 <= lon <= 180):
+        return None
+    rec.update(lat=lat if north else -lat, lon=-lon if west else lon, sym=b[7] + b[6])
+    if speed:
+        rec.update(speed_kmh=round(speed * 1.852, 1), course=course % 360)
+    comment = b[8:]
+    if len(comment) >= 4 and comment[3] == "}":
+        rec["alt_m"] = _b91(comment[:3]) - 10000
+        comment = comment[4:]
+    elif comment[:1] in ">]`'" and len(comment) >= 5 and comment[4] == "}":
+        rec["alt_m"] = _b91(comment[1:4]) - 10000
+        comment = comment[5:]
+    rec["comment"] = comment.lstrip(">]`'").strip()[:200]
+    return rec
+
+
+def parse_aprs(line):
+    """One APRS-IS line -> dict (type: position|object|item|message|status|weather|other) or None."""
+    line = line.rstrip("\r\n")
+    if not line or line[0] == "#" or ":" not in line or ">" not in line.split(":", 1)[0]:
+        return None
+    head, payload = line.split(":", 1)
+    src, rest = head.split(">", 1)
+    dst, *path = rest.split(",")
+    if not payload:
+        return None
+    if payload[0] == "}":  # third-party traffic: parse the inner packet
+        inner = parse_aprs(payload[1:])
+        if inner:
+            inner["raw"] = line[:300]
+        return inner
+    rec = {"src": src.upper(), "dst": dst, "path": ",".join(path), "raw": line[:300], "call": src.upper()}
+    t, b = payload[0], payload[1:]
+    try:
+        if t in "!=":
+            r = _position(rec, b)
+            return dict(r, type="position") if r else None
+        if t in "/@":
+            r = _position(rec, b[7:])
+            return dict(r, type="position") if r else None
+        if t == ";" and len(b) >= 17:
+            name, live = b[:9].strip(), b[9]
+            r = _position(dict(rec, call=name, by=rec["src"]), b[17:])
+            return dict(r, type="object", killed=live == "_") if r else None
+        if t == ")":
+            m = re.match(r"(.{3,9}?)([!_])", b)
+            if m:
+                r = _position(dict(rec, call=m[1].strip(), by=rec["src"]), b[m.end():])
+                return dict(r, type="item", killed=m[2] == "_") if r else None
+            return None
+        if t in "`'":
+            r = _mic_e(rec, dst, b)
+            return dict(r, type="position") if r else None
+        if t == ":" and len(b) >= 10 and b[9] == ":":
+            to, text = b[:9].strip().upper(), b[10:]
+            msg = dict(rec, type="message", to=to, text=text[:200])
+            if re.fullmatch(r"(ack|rej)[A-Za-z0-9]{1,5}\}?.*", text):
+                msg.update(ack=text[:3], msgno=re.sub(r"[^A-Za-z0-9].*", "", text[3:]))
+            elif "{" in text:
+                body, no = text.rsplit("{", 1)
+                msg.update(text=body[:200], msgno=no.split("}")[0][:5])
+            return msg
+        if t == ">":
+            return dict(rec, type="status", comment=b[:200])
+        if t == "_" and len(b) >= 8:
+            wx, _ = _wx_fields(b[8:])
+            return dict(rec, type="weather", wx=wx) if wx else None
+    except (ValueError, IndexError, TypeError):
+        return None
+    return dict(rec, type="other")
+
+
+def aprs_coord(lat, lon):
+    """Decimal degrees -> APRS 'DDMM.mmN', 'DDDMM.mmW'."""
+    la, lo = abs(lat), abs(lon)
+    lad, lam = int(la), (la - int(la)) * 60
+    lod, lom = int(lo), (lo - int(lo)) * 60
+    if round(lam, 2) >= 60:
+        lad, lam = lad + 1, 0
+    if round(lom, 2) >= 60:
+        lod, lom = lod + 1, 0
+    return f"{lad:02d}{lam:05.2f}{'N' if lat >= 0 else 'S'}", f"{lod:03d}{lom:05.2f}{'E' if lon >= 0 else 'W'}"
+
+
+def aprs_clean(s, n):
+    """Printable ASCII only (APRS is 7-bit), trimmed to n characters."""
+    return re.sub(r"[^\x20-\x7e]", "", str(s or "").replace("|", "/").replace("~", "-"))[:n]
+
+
+class AprsService:
+    """Keeps a read-only APRS-IS connection with an area filter and remembers what it hears."""
+    UA = f"TACISS/{VERSION} (+https://github.com/amorilab/taciss)"
+    MAX_STATIONS = 4000
+    KEEP_HOURS = 24
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.stations = {}  # call/object name -> latest record
+        self.packets = collections.deque(maxlen=400)
+        self.messages = collections.deque(maxlen=600)
+        self.status = {"connected": False, "server": None, "since": None, "error": None, "packets": 0,
+                       "filter": None}
+        self.sock = None
+        self.want_filter = None
+        self.dirty = False
+        self.wake = threading.Event()
+        self.api_cache = {}
+        self.last_tx = {}   # username -> [timestamps]
+
+    # ---- settings / filter
+    @staticmethod
+    def settings():
+        return FeedService.settings()
+
+    def watch_calls(self):
+        """Callsigns whose messages we want (every user's own callsign) plus users' watch lists."""
+        calls, buddies = set(), set()
+        con = connect()
+        try:
+            for r in con.execute("SELECT callsign, prefs FROM users WHERE active = 1"):
+                if r["callsign"] and CALL_RE.match(r["callsign"].upper()):
+                    calls.add(r["callsign"].upper())
+                try:
+                    for c in (json.loads(r["prefs"] or "{}").get("aprs_watch") or [])[:30]:
+                        buddies.add(c)
+                except ValueError:
+                    pass
+        finally:
+            con.close()
+        return sorted(calls), sorted(buddies)
+
+    def build_filter(self, s=None):
+        s = s or self.settings()
+        try:
+            lat, lon = float(s.get("map_lat") or 35.86), float(s.get("map_lon") or -86.35)
+            km = max(5, min(int(float(s.get("aprs_range_km") or 150)), 2000))
+        except ValueError:
+            lat, lon, km = 35.86, -86.35, 150
+        parts = [f"r/{lat:.3f}/{lon:.3f}/{km}"]
+        calls, buddies = self.watch_calls()
+        if calls:
+            parts.append("g/" + "/".join(calls[:60]))       # messages to our users
+            parts.append("b/" + "/".join(c + "*" for c in calls[:60]))  # our users' own stations, any SSID
+        if buddies:
+            parts.append("b/" + "/".join(buddies[:60]))
+        extra = re.sub(r"[^\x20-\x7e]", "", s.get("aprs_filter_extra") or "").strip()
+        if extra:
+            parts.append(extra[:300])
+        return " ".join(parts)
+
+    def refilter(self):
+        """Settings or watch lists changed: push a new filter to the open connection."""
+        self.want_filter = None
+        self.wake.set()
+
+    # ---- receive loop
+    def run(self):
+        backoff = 5
+        while True:
+            s = self.settings()
+            if s.get("aprs_enabled") != "1":
+                with self.lock:
+                    self.status.update(connected=False, error="APRS is turned off in Admin settings.")
+                self.wake.wait(30)
+                self.wake.clear()
+                continue
+            try:
+                self.session(*self.server_of(s))
+                backoff = 5
+            except (OSError, ValueError) as e:
+                with self.lock:
+                    self.status.update(connected=False, error=f"{type(e).__name__}: {e}"[:200])
+            finally:
+                self.sock = None
+            self.wake.wait(backoff)
+            self.wake.clear()
+            backoff = min(backoff * 2, 300)
+
+    def session(self, host, port):
+        import socket
+        flt = self.build_filter()
+        sock = socket.create_connection((host, port), timeout=30)
+        self.sock = sock
+        buf = b""
+        try:
+            sock.sendall(f"user {self.rx_login()} pass -1 vers TACISS {VERSION} filter {flt}\r\n".encode())
+            self.want_filter = flt
+            with self.lock:
+                self.status.update(connected=True, since=now_iso(), error=None, filter=flt, server=host)
+            last_push = last_ka = time.time()
+            sock.settimeout(5)
+            while True:
+                if self.wake.is_set():  # settings changed
+                    self.wake.clear()
+                    s = self.settings()
+                    if s.get("aprs_enabled") != "1" or self.server_of(s) != (host, port):
+                        return  # turned off, or a different server: run() reconnects
+                if self.want_filter is None:  # area or watch list changed: tell the server
+                    flt = self.build_filter()
+                    sock.sendall(f"#filter {flt}\r\n".encode())
+                    self.want_filter = flt
+                    with self.lock:
+                        self.status["filter"] = flt
+                try:
+                    data = sock.recv(65536)
+                    if not data:
+                        raise ConnectionError("server closed the connection")
+                    buf += data
+                except socket.timeout:
+                    pass
+                if len(buf) > 1_000_000:
+                    buf = b""
+                *lines, buf = buf.split(b"\n")
+                for raw in lines:
+                    line = raw.decode("latin-1", "replace").strip()
+                    if line.startswith("# logresp"):
+                        m = re.search(r"server (\S+)", line)
+                        with self.lock:
+                            self.status["server"] = f"{m[1] if m else host} ({host})"
+                    elif line.startswith("# Login") or "not allowed" in line:
+                        with self.lock:  # e.g. "# Login by user not allowed": keep it for the status line
+                            self.status["error"] = line[2:200]
+                    elif line and not line.startswith("#"):
+                        self.ingest(line)
+                now = time.time()
+                if now - last_ka > 120:  # keepalive so the server keeps the session
+                    sock.sendall(b"#keepalive\r\n")
+                    last_ka = now
+                if self.dirty and now - last_push > 4:
+                    self.dirty = False
+                    last_push = now
+                    BUS.publish({"entity": "aprs", "action": "update", "public": False})
+        finally:
+            with self.lock:
+                self.status["connected"] = False
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+    @staticmethod
+    def rx_login():
+        """Read-only APRS-IS login. Servers refuse N0CALL and drop duplicate logins, so each
+        TACISS node uses its own name derived from its mesh node ID (e.g. TACAB12CD)."""
+        nid = re.sub(r"[^0-9A-F]", "", str(NODE.get("id") or "").upper())
+        return "TAC" + (nid[:6] or secrets.token_hex(3).upper())
+
+    @staticmethod
+    def server_of(s):
+        host, _, port = (s.get("aprs_server") or "rotate.aprs2.net:14580").partition(":")
+        return host.strip(), int(port or 14580)
+
+    def ingest(self, line, now=None):
+        rec = parse_aprs(line)
+        ts = now or now_iso()
+        with self.lock:
+            self.status["packets"] += 1
+            self.packets.append({"t": ts, "raw": line[:300], "type": rec["type"] if rec else "unparsed"})
+            if not rec:
+                return rec
+            if rec["type"] == "message":
+                self.messages.append({"t": ts, "src": rec["src"], "to": rec["to"], "text": rec.get("text"),
+                                      "msgno": rec.get("msgno"), "ack": rec.get("ack")})
+            elif rec.get("lat") is not None or rec["type"] in ("status", "weather"):
+                key = rec["call"]
+                old = self.stations.get(key, {})
+                if rec.get("killed"):
+                    self.stations.pop(key, None)
+                else:
+                    new = {k: v for k, v in old.items() if k in ("lat", "lon", "sym", "first", "count", "wx",
+                                                                 "comment", "status")}
+                    for k in ("lat", "lon", "sym", "course", "speed_kmh", "alt_m", "wx", "by", "path", "type"):
+                        if rec.get(k) is not None:
+                            new[k] = rec[k]
+                    if rec["type"] == "status":
+                        new["status"] = rec.get("comment")
+                        new.setdefault("type", "position")
+                    elif rec.get("comment") is not None:
+                        new["comment"] = rec["comment"]
+                    new.update(call=key, last=ts, first=old.get("first") or ts, count=old.get("count", 0) + 1,
+                               raw=rec["raw"])
+                    if new.get("lat") is not None:
+                        self.stations[key] = new
+                if len(self.stations) > self.MAX_STATIONS:
+                    for k, _ in sorted(self.stations.items(), key=lambda kv: kv[1]["last"])[:500]:
+                        self.stations.pop(k, None)
+            self.dirty = True
+        return rec
+
+    def snapshot(self, hours=2):
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=max(0.1, min(hours, self.KEEP_HOURS)))) \
+            .strftime("%Y-%m-%dT%H:%M:%SZ")
+        with self.lock:
+            return [dict(v) for v in self.stations.values() if v["last"] >= cutoff]
+
+    def start(self):
+        threading.Thread(target=self.run, name="aprs-is", daemon=True).start()
+
+    # ---- aprs.fi API
+    def aprsfi(self, params, ttl=60):
+        key = self.settings_secret("aprsfi_api_key")
+        if not key:
+            raise ApiError(400, "An aprs.fi API key isn't set. An admin can add one in Admin -> Settings "
+                                "(free from your aprs.fi account page).")
+        ck = json.dumps(params, sort_keys=True)
+        hit = self.api_cache.get(ck)
+        if hit and time.time() - hit[0] < ttl:
+            return hit[1]
+        url = "https://api.aprs.fi/api/get?" + urlencode(dict(params, apikey=key, format="json"))
+        try:
+            with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": self.UA}), timeout=15) as r:
+                data = json.loads(r.read(2 * 1024 * 1024).decode("utf-8", "replace"))
+        except (OSError, ValueError) as e:
+            raise ApiError(502, f"Couldn't reach aprs.fi: {e}")
+        if data.get("result") != "ok":
+            raise ApiError(502, f"aprs.fi: {data.get('description') or data.get('code') or 'request failed'}")
+        self.api_cache[ck] = (time.time(), data)
+        if len(self.api_cache) > 300:
+            self.api_cache.clear()
+        return data
+
+    @staticmethod
+    def settings_secret(k):
+        con = connect()
+        try:
+            r = con.execute("SELECT value FROM settings WHERE key = ?", (k,)).fetchone()
+            return r[0] if r else ""
+        finally:
+            con.close()
+
+    # ---- transmit
+    def send(self, call, passcode, packet, host=None, port=None):
+        """Log in to APRS-IS as `call` and send one packet line. Returns the server's login reply."""
+        import socket
+        s = self.settings()
+        if not host:
+            host, port = self.server_of(s)
+        with socket.create_connection((host.strip(), port), timeout=15) as sock:
+            f = sock.makefile("rb")
+            f.readline()
+            sock.sendall(f"user {call} pass {passcode} vers TACISS {VERSION}\r\n".encode())
+            reply = ""
+            deadline = time.time() + 10
+            while time.time() < deadline:
+                line = f.readline().decode("latin-1", "replace").strip()
+                if line.startswith("# logresp"):
+                    reply = line
+                    break
+                if not line:
+                    break
+            if " verified" not in reply or "unverified" in reply:
+                raise ApiError(400, f"APRS-IS didn't accept the login for {call}. Check the passcode. "
+                                    f"({reply or 'no reply'})")
+            sock.sendall(packet.encode("ascii") + b"\r\n")
+            time.sleep(1)  # let it go out before closing
+        self.ingest(packet)  # show it locally right away
+        return reply
+
+
+APRS = AprsService()
 
 
 def clean_record(entity, data, partial):
@@ -2200,6 +2729,497 @@ UPDATES = UpdateChecker()
 
 
 # --------------------------------------------------------------------------
+# Debrief kit: a PDF packet of everything recorded for a closed incident.
+# Small stdlib PDF writer (the standard Helvetica/Courier fonts every PDF reader
+# has built in), so it works offline with no extra packages.
+# --------------------------------------------------------------------------
+# Character widths (1/1000 em) for ASCII 32..126, from the Adobe font metrics
+_HELV = [278, 278, 355, 556, 556, 889, 667, 191, 333, 333, 389, 584, 278, 333, 278, 278] + [556] * 10 + [
+    278, 278, 584, 584, 584, 556, 1015,
+    667, 667, 722, 722, 667, 611, 778, 722, 278, 500, 667, 556, 833, 722, 778, 667, 778, 722, 667, 611, 722, 667,
+    944, 667, 667, 611, 278, 278, 278, 469, 556, 333,
+    556, 556, 500, 556, 556, 278, 556, 556, 222, 222, 500, 222, 833, 556, 556, 556, 556, 333, 500, 278, 556, 500,
+    722, 500, 500, 500, 334, 260, 334, 584]
+_HELVB = [278, 333, 474, 556, 556, 889, 722, 238, 333, 333, 389, 584, 278, 333, 278, 278] + [556] * 10 + [
+    333, 333, 584, 584, 584, 611, 975,
+    722, 722, 722, 722, 667, 611, 778, 722, 278, 556, 722, 611, 833, 722, 778, 667, 778, 722, 667, 611, 722, 667,
+    944, 667, 667, 611, 333, 278, 333, 584, 556, 333,
+    556, 611, 556, 611, 556, 333, 611, 611, 278, 278, 556, 278, 889, 611, 611, 611, 611, 389, 556, 333, 611, 556,
+    778, 556, 556, 500, 389, 280, 389, 584]
+
+INK, MUTED_INK, RULE = (0.09, 0.11, 0.16), (0.36, 0.40, 0.47), (0.82, 0.85, 0.89)
+NAVY_RGB, ORANGE_RGB, ZEBRA = (0.043, 0.067, 0.125), (0.976, 0.451, 0.086), (0.955, 0.965, 0.98)
+
+
+class PdfDoc:
+    W, H, M = 612, 792, 54  # US Letter, 3/4 inch margins
+    FONTS = {"R": ("F1", "Helvetica", _HELV), "B": ("F2", "Helvetica-Bold", _HELVB),
+             "I": ("F3", "Helvetica-Oblique", _HELV), "C": ("F4", "Courier", None)}
+
+    def __init__(self, title, footer):
+        self.title, self.footer = title, footer
+        self.pages, self.ops, self.y = [], None, 0
+        self.new_page()
+
+    @property
+    def inner(self):
+        return self.W - 2 * self.M
+
+    @staticmethod
+    def enc(s):
+        b = str(s).replace("\t", "    ").encode("cp1252", "replace")
+        return b.replace(b"\\", b"\\\\").replace(b"(", b"\\(").replace(b")", b"\\)").decode("latin-1")
+
+    def width(self, s, f="R", size=10):
+        table = self.FONTS[f][2]
+        if table is None:
+            return 0.6 * size * len(s)
+        return size / 1000 * sum(table[ord(c) - 32] if 32 <= ord(c) <= 126 else 556 for c in s)
+
+    def wrap(self, text, f="R", size=10, maxw=None):
+        maxw = maxw or self.inner
+        out = []
+        for para in str(text if text is not None else "").replace("\r\n", "\n").split("\n"):
+            line = ""
+            for word in para.split(" "):
+                cand = word if not line else line + " " + word
+                if self.width(cand, f, size) <= maxw:
+                    line = cand
+                    continue
+                if line:
+                    out.append(line)
+                while self.width(word, f, size) > maxw:  # a single word longer than the line
+                    cut = len(word)
+                    while cut > 1 and self.width(word[:cut], f, size) > maxw:
+                        cut -= 1
+                    out.append(word[:cut])
+                    word = word[cut:]
+                line = word
+            out.append(line)
+        return out or [""]
+
+    # ---- drawing primitives
+    def new_page(self):
+        self.ops = []
+        self.pages.append(self.ops)
+        self.y = self.H - self.M - 12
+
+    def ensure(self, h):
+        if self.y - h < self.M + 26:
+            self.new_page()
+
+    def text(self, x, y, s, f="R", size=10, color=INK):
+        self.ops.append(f"BT /{self.FONTS[f][0]} {size} Tf {color[0]} {color[1]} {color[2]} rg "
+                        f"{x:.2f} {y:.2f} Td ({self.enc(s)}) Tj ET")
+
+    def rect(self, x, y, w, h, color):
+        self.ops.append(f"{color[0]} {color[1]} {color[2]} rg {x:.2f} {y:.2f} {w:.2f} {h:.2f} re f")
+
+    def hline(self, y, color=RULE, x0=None, x1=None, width=0.6):
+        x0 = self.M if x0 is None else x0
+        x1 = self.W - self.M if x1 is None else x1
+        self.ops.append(f"{color[0]} {color[1]} {color[2]} RG {width} w {x0:.2f} {y:.2f} m {x1:.2f} {y:.2f} l S")
+
+    # ---- layout helpers
+    def space(self, h):
+        self.y -= h
+
+    def para(self, s, f="R", size=10, indent=0, color=INK, gap=4):
+        lead = size * 1.32
+        for ln in self.wrap(s, f, size, self.inner - indent):
+            self.ensure(lead)
+            self.y -= lead
+            self.text(self.M + indent, self.y, ln, f, size, color)
+        self.y -= gap
+
+    def heading(self, s, sub=None):
+        self.ensure(70)
+        self.y -= 22
+        self.rect(self.M, self.y - 3, 4, 17, ORANGE_RGB)
+        self.text(self.M + 12, self.y, s, "B", 15)
+        if sub:
+            self.text(self.W - self.M - self.width(sub, "R", 9), self.y, sub, "R", 9, MUTED_INK)
+        self.y -= 9
+        self.hline(self.y)
+        self.y -= 6
+
+    def subheading(self, s):
+        self.ensure(40)
+        self.y -= 16
+        self.text(self.M, self.y, s, "B", 11.5)
+        self.y -= 5
+
+    def kv(self, rows, label_w=150, size=9.5):
+        lead = size * 1.32
+        for label, value in rows:
+            lines = self.wrap(value if value not in (None, "") else "-", "R", size, self.inner - label_w)
+            labels = self.wrap(label, "B", size - 0.5, label_w - 10)
+            self.ensure(lead * min(max(len(lines), len(labels)), 3) + 3)
+            for k in range(max(len(lines), len(labels))):
+                self.ensure(lead)
+                self.y -= lead
+                if k < len(labels):
+                    self.text(self.M, self.y, labels[k], "B", size - 0.5, MUTED_INK)
+                if k < len(lines):
+                    self.text(self.M + label_w, self.y, lines[k], "R", size)
+            self.y -= 3
+
+    def table(self, cols, rows, size=8.5):
+        """cols: [(title, fraction of width)]; rows: lists of cell strings. Header repeats on each page."""
+        widths = [frac * self.inner for _, frac in cols]
+        lead, pad = size * 1.28, 4
+        max_lines = int((self.H - 2 * self.M - 90) / lead)  # tallest row that fits on one page
+
+        def header():
+            self.ensure(lead + 2 * pad + 14)
+            h = lead + 2 * pad
+            self.rect(self.M, self.y - h, self.inner, h, NAVY_RGB)
+            x = self.M
+            for (title, _), w in zip(cols, widths):
+                self.text(x + pad, self.y - pad - size, title, "B", size, (1, 1, 1))
+                x += w
+            self.y -= h
+
+        if not rows:
+            self.para("None recorded.", "I", 9.5, color=MUTED_INK)
+            return
+        header()
+        for i, row in enumerate(rows):
+            cells = [self.wrap(c if c not in (None, "") else "-", "R", size, w - 2 * pad) for c, w in zip(row, widths)]
+            while cells:  # a very long cell continues in a follow-on row on the next page
+                part = [c[:max_lines] for c in cells]
+                rest = [c[max_lines:] for c in cells]
+                n = max(len(c) for c in part)
+                h = n * lead + 2 * pad
+                if self.y - h < self.M + 26:
+                    self.new_page()
+                    header()
+                if i % 2:
+                    self.rect(self.M, self.y - h, self.inner, h, ZEBRA)
+                x = self.M
+                for c, w in zip(part, widths):
+                    for k, ln in enumerate(c):
+                        self.text(x + pad, self.y - pad - size - k * lead + 1, ln, "R", size)
+                    x += w
+                self.y -= h
+                self.hline(self.y, width=0.4)
+                cells = rest if any(rest) else None
+        self.y -= 6
+
+    def lines_to_fill(self, label, n=4):
+        self.subheading(label)
+        for _ in range(n):
+            self.ensure(24)
+            self.y -= 22
+            self.hline(self.y, color=(0.7, 0.73, 0.78))
+        self.y -= 4
+
+    # ---- output
+    def render(self, producer):
+        n = len(self.pages)
+        objs = []
+
+        def add(body):
+            objs.append(body if isinstance(body, bytes) else body.encode("latin-1"))
+            return len(objs)
+
+        add("<< /Type /Catalog /Pages 2 0 R >>")
+        add("")  # page tree, filled in below once the page ids are known
+        font_ids = {}
+        for fid, base, _ in self.FONTS.values():
+            enc = "" if base == "Courier" else " /Encoding /WinAnsiEncoding"
+            font_ids[fid] = add(f"<< /Type /Font /Subtype /Type1 /BaseFont /{base}{enc} >>")
+        fonts = " ".join(f"/{k} {v} 0 R" for k, v in font_ids.items())
+        stamp = datetime.now(timezone.utc).strftime("D:%Y%m%d%H%M%SZ")
+        info = add(f"<< /Title ({self.enc(self.title)}) /Producer ({self.enc(producer)}) /Creator (TACISS) "
+                   f"/CreationDate ({stamp}) >>")
+        mi = MUTED_INK
+        kids = []
+        for i, ops in enumerate(self.pages, 1):
+            fy = self.M - 22
+            right = f"Page {i} of {n}"
+            extra = [f"{RULE[0]} {RULE[1]} {RULE[2]} RG 0.6 w {self.M} {fy + 12} m {self.W - self.M} {fy + 12} l S"]
+            for x, s in ((self.M, self.footer), (self.W - self.M - self.width(right, "R", 8), right)):
+                extra.append(f"BT /F1 8 Tf {mi[0]} {mi[1]} {mi[2]} rg {x:.2f} {fy} Td ({self.enc(s)}) Tj ET")
+            if i > 1:  # running title on every page after the cover
+                extra.append(f"BT /F2 8 Tf {mi[0]} {mi[1]} {mi[2]} rg {self.M} {self.H - self.M + 14} Td "
+                             f"({self.enc(self.title)}) Tj ET")
+            data = zlib.compress("\n".join(ops + extra).encode("latin-1"))
+            cid = add(f"<< /Length {len(data)} /Filter /FlateDecode >>\nstream\n".encode() + data + b"\nendstream")
+            kids.append(add(f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {self.W} {self.H}] "
+                            f"/Resources << /Font << {fonts} >> >> /Contents {cid} 0 R >>"))
+        objs[1] = f"<< /Type /Pages /Kids [{' '.join(f'{k} 0 R' for k in kids)}] /Count {n} >>".encode()
+        out = bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
+        offsets = []
+        for i, body in enumerate(objs, 1):
+            offsets.append(len(out))
+            out += f"{i} 0 obj\n".encode() + body + b"\nendobj\n"
+        xref = len(out)
+        out += f"xref\n0 {len(objs) + 1}\n0000000000 65535 f \n".encode()
+        out += "".join(f"{o:010d} 00000 n \n" for o in offsets).encode()
+        out += (f"trailer\n<< /Size {len(objs) + 1} /Root 1 0 R /Info {info} 0 R >>\n"
+                f"startxref\n{xref}\n%%EOF\n").encode()
+        return bytes(out)
+
+
+def _ts(v):
+    """Stored UTC timestamp -> '2026-11-09 14:03Z'."""
+    if not v:
+        return "-"
+    s = str(v)
+    return s[:16].replace("T", " ") + "Z" if len(s) >= 16 and s[10:11] == "T" else s
+
+
+def _count(n, one, many=None):
+    return f"{n} {one if n == 1 else (many or one + 's')}"
+
+
+def _nice(v):
+    return str(v).replace("_", " ").capitalize() if v not in (None, "") else "-"
+
+
+def _duration(a, b):
+    try:
+        fmt = "%Y-%m-%dT%H:%M:%SZ"
+        sec = int((datetime.strptime(b, fmt) - datetime.strptime(a, fmt)).total_seconds())
+    except (TypeError, ValueError):
+        return "-"
+    d, rem = divmod(max(sec, 0), 86400)
+    h, rem = divmod(rem, 3600)
+    return (f"{d} d " if d else "") + f"{h} h {rem // 60} min"
+
+
+def build_debrief(con, inc, user, settings):
+    """Everything recorded for one incident as a PDF debrief packet. Returns (pdf bytes, file name)."""
+    iid = inc["id"]
+
+    def q(sql, *a):
+        return [dict(r) for r in con.execute(sql, a)]
+
+    progs = {r["id"]: r for r in q("SELECT * FROM programs")}
+    agencies = {r["id"]: r for r in q("SELECT * FROM agencies")}
+    people = {r["username"].lower(): r for r in q("SELECT username, display_name, callsign, role FROM users")}
+    log = q("SELECT * FROM activity WHERE incident_id = ? ORDER BY created_at, id", iid)
+    reports = q("SELECT * FROM reports WHERE incident_id = ? ORDER BY created_at, id", iid)
+    checkins = q("SELECT * FROM checkins WHERE incident_id = ? ORDER BY created_at, id", iid)
+    resources = q("SELECT * FROM resources WHERE incident_id = ? ORDER BY name", iid)
+    chat = q("SELECT * FROM messages WHERE channel = ? ORDER BY created_at, id", f"incident-{iid}")
+    related = {"incidents": [iid], "activity": [r["id"] for r in log], "reports": [r["id"] for r in reports],
+               "checkins": [r["id"] for r in checkins], "resources": [r["id"] for r in resources],
+               "messages": [r["id"] for r in chat]}
+    history = []
+    for ent, ids in related.items():
+        for i in range(0, len(ids), 500):
+            chunk = ids[i:i + 500]
+            history += q(f"SELECT * FROM audit WHERE entity = ? AND entity_id IN ({','.join('?' * len(chunk))})",
+                         ent, *chunk)
+    history.sort(key=lambda r: (r["ts"], r["id"]))
+    status_changes = [h for h in history if h["entity"] == "incidents" and h["action"] == "update"
+                      and "status" in (h["detail"] or "")]
+    closed_at = status_changes[-1]["ts"] if status_changes else inc.get("updated_at")
+
+    def ref_names(ids, table):
+        return ", ".join(table[i]["name"] for i in parse_refs(ids) if i in table) or "-"
+
+    def who(username):
+        if not username:
+            return "-"
+        p = people.get(str(username).lower())
+        if not p:
+            return str(username)
+        name = p.get("display_name") or p["username"]
+        return " ".join(b for b in (p.get("callsign"), name) if b) + ("" if name == p["username"] else f" ({p['username']})")
+
+    site = settings.get("site_name") or "TACISS"
+    generated = now_iso()
+    doc = PdfDoc(f"Debrief Kit - Incident #{iid}: {inc.get('title') or ''}",
+                 f"{site} incident #{iid} debrief kit  |  generated {_ts(generated)} by {user['username']}  |  times UTC")
+
+    # ---- cover
+    band = 190
+    doc.rect(0, doc.H - band, doc.W, band, NAVY_RGB)
+    doc.rect(0, doc.H - band - 6, doc.W, 6, ORANGE_RGB)
+    doc.text(doc.M, doc.H - 70, site.upper(), "B", 13, ORANGE_RGB)
+    doc.text(doc.M, doc.H - 88, settings.get("org_name") or "", "R", 9.5, (0.75, 0.79, 0.86))
+    doc.text(doc.M, doc.H - 132, "INCIDENT DEBRIEF KIT", "B", 28, (1, 1, 1))
+    doc.text(doc.M, doc.H - 156, f"Incident #{iid}  |  Closed {_ts(closed_at)}", "R", 11, (0.85, 0.88, 0.93))
+    doc.y = doc.H - band - 34
+    doc.para(inc.get("title") or "(untitled incident)", "B", 20, gap=10)
+    if (inc.get("visibility") or "open") == "restricted":
+        doc.ensure(40)
+        doc.rect(doc.M, doc.y - 30, doc.inner, 30, (0.99, 0.91, 0.91))
+        doc.text(doc.M + 10, doc.y - 19, "RESTRICTED INCIDENT - share this packet only with its assigned programs "
+                                         "and served agencies.", "B", 9.5, (0.6, 0.1, 0.1))
+        doc.space(40)
+    doc.kv([("Type", _nice(inc.get("kind"))), ("Priority", _nice(inc.get("priority"))),
+            ("Status", _nice(inc.get("status"))), ("Access", _nice(inc.get("visibility") or "open")),
+            ("Opened", f"{_ts(inc.get('created_at'))} by {who(inc.get('created_by'))}"),
+            ("Closed", _ts(closed_at)), ("Duration", _duration(inc.get("created_at"), closed_at)),
+            ("Location", inc.get("location")),
+            ("Assigned programs", ref_names(inc.get("programs"), progs)),
+            ("Served agencies", ref_names(inc.get("agencies"), agencies)),
+            ("Incident commander / NCS", inc.get("commander")), ("Radio net / frequency", inc.get("radio_net"))])
+    doc.subheading("In this packet")
+    n_events = len(log) + len(reports) + len(checkins) + len(chat) + 1 + \
+        sum(1 for c in checkins if c.get("checked_out_at")) + sum(1 for h in history if h["action"] != "create")
+    for name, count in (("1. Incident details", ""), ("2. People involved", ""), ("3. Timeline", _count(n_events, "event")),
+                        ("4. Activity log", _count(len(log), "entry", "entries")), ("5. Reports", _count(len(reports), "report")),
+                        ("6. Net check-ins", _count(len(checkins), "check-in")), ("7. Resources", f"{len(resources)} assigned"),
+                        ("8. Incident chat", _count(len(chat), "message")), ("9. Change history", _count(len(history), "change")),
+                        ("10. Debrief worksheet", "to fill in at the debrief")):
+        doc.ensure(14)
+        doc.space(13.5)
+        doc.text(doc.M + 8, doc.y, name, "R", 10)
+        if count:
+            doc.text(doc.M + 230, doc.y, count, "R", 10, MUTED_INK)
+    doc.space(14)
+    doc.para(f"This packet contains everything recorded in {site} for this incident as of {_ts(generated)}: its "
+             "details, log, reports, check-ins, resources, chat and change history. It was generated by "
+             f"{who(user['username'])}. All times are UTC unless a field says otherwise.", "I", 8.5, color=MUTED_INK)
+
+    # ---- 1. details
+    doc.new_page()
+    doc.heading("1. Incident details", f"Incident #{iid}")
+    rows = []
+    for f in ENTITIES["incidents"]["fields"]:
+        if f["name"] == "description":
+            continue
+        v = inc.get(f["name"])
+        if f["type"] == "refs":
+            v = ref_names(v, progs if f["ref"] == "programs" else agencies)
+        elif f["choices"]:
+            v = _nice(v)
+        rows.append((f["label"], "" if v is None else str(v)))
+    rows += [("Created", f"{_ts(inc.get('created_at'))} by {who(inc.get('created_by'))}"),
+             ("Last updated", f"{_ts(inc.get('updated_at'))} by {who(inc.get('updated_by'))}")]
+    doc.kv(rows)
+    doc.subheading("Description")
+    doc.para(inc.get("description") or "No description recorded.", "R", 10,
+             color=INK if inc.get("description") else MUTED_INK)
+    prog_items = [progs[i] for i in parse_refs(inc.get("programs")) if i in progs]
+    if prog_items:
+        doc.subheading("Assigned programs")
+        doc.table([("Program", .28), ("Type", .1), ("Coordinator", .24), ("Counties", .18), ("Frequencies", .2)],
+                  [[p["name"], p.get("kind"), " ".join(x for x in (p.get("coordinator"), p.get("coordinator_call")) if x),
+                    p.get("counties"), p.get("frequencies")] for p in prog_items])
+    agency_items = [agencies[i] for i in parse_refs(inc.get("agencies")) if i in agencies]
+    if agency_items:
+        doc.subheading("Served agencies")
+        doc.table([("Agency", .32), ("Type", .22), ("County", .14), ("Phone", .14), ("Email", .18)],
+                  [[a["name"], a.get("kind"), a.get("county"), a.get("phone"), a.get("email")] for a in agency_items])
+
+    # ---- 2. people
+    doc.heading("2. People involved")
+    tally = {}
+    for src, recs in (("incident", [inc]), ("log", log), ("reports", reports), ("check-ins", checkins),
+                      ("resources", resources), ("chat", chat)):
+        for r in recs:
+            for k in ("created_by", "updated_by"):
+                if r.get(k):
+                    t = tally.setdefault(r[k].lower(), {"name": r[k], "what": {}})
+                    t["what"][src] = t["what"].get(src, 0) + (k == "created_by")
+    doc.subheading("TACISS users who entered or changed information")
+    doc.table([("User", .38), ("Role", .12), ("Contributed", .5)],
+              [[who(t["name"]), (people.get(k) or {}).get("role") or "-",
+                ", ".join(f"{src} ({n})" if n else f"{src} (edits)" for src, n in t["what"].items())]
+               for k, t in sorted(tally.items())])
+    doc.subheading("Stations on the net")
+    doc.table([("Callsign", .16), ("Name", .24), ("Assignment", .32), ("Final status", .14), ("Traffic", .14)],
+              [[c.get("callsign"), c.get("name"), c.get("assignment"), _nice(c.get("status")), _nice(c.get("traffic"))]
+               for c in checkins])
+
+    # ---- 3. timeline
+    doc.heading("3. Timeline", "everything, oldest first")
+    events = [(inc.get("created_at"), "Incident", who(inc.get("created_by")), f"Incident opened: {inc.get('title')}")]
+    events += [(r["created_at"], "Log", who(r.get("created_by")), r.get("body")) for r in log]
+    events += [(r["created_at"], "Report", who(r.get("created_by")),
+                f"{_nice(r.get('kind'))} ({_nice(r.get('severity'))}): {r.get('title')}") for r in reports]
+    events += [(r["created_at"], "Check-in", who(r.get("created_by")),
+                f"{r.get('callsign')} {r.get('name') or ''} checked in".replace("  ", " ")
+                + (f" - {r.get('assignment')}" if r.get("assignment") else "")) for r in checkins]
+    events += [(r["checked_out_at"], "Check-out", "-", f"{r.get('callsign')} checked out")
+               for r in checkins if r.get("checked_out_at")]
+    events += [(r["created_at"], "Chat", who(r.get("created_by")), r.get("body")) for r in chat]
+    events += [(h["ts"], "Change", who(h.get("username")),
+                f"{h['action']} {'log entry' if h['entity'] == 'activity' else h['entity'].rstrip('s')} #{h['entity_id']}"
+                + (f": {h['detail']}" if h.get("detail") else "")) for h in history if h["action"] != "create"]
+    events.sort(key=lambda e: str(e[0] or ""))
+    doc.table([("Time (UTC)", .17), ("Source", .1), ("By", .2), ("What happened", .53)],
+              [[_ts(t), s, b, w] for t, s, b, w in events])
+
+    # ---- 4. activity log
+    doc.heading("4. Activity log", _count(len(log), "entry", "entries"))
+    doc.table([("Time (UTC)", .17), ("By", .2), ("Entry", .63)],
+              [[_ts(r["created_at"]), who(r.get("created_by")), r.get("body")] for r in log])
+
+    # ---- 5. reports
+    doc.heading("5. Reports", _count(len(reports), "report"))
+    if not reports:
+        doc.para("None recorded.", "I", 9.5, color=MUTED_INK)
+    for r in reports:
+        doc.subheading(f"Report #{r['id']}: {r.get('title') or ''}")
+        rrows = []
+        for f in ENTITIES["reports"]["fields"]:
+            v = r.get(f["name"])
+            if f["name"] in ("title", "incident_id", "body") or v in (None, ""):
+                continue
+            rrows.append((f["label"], _nice(v) if f["choices"] else str(v)))
+        rrows.append(("Submitted", f"{_ts(r.get('created_at'))} by {who(r.get('created_by'))}"))
+        if r.get("updated_at") != r.get("created_at"):
+            rrows.append(("Last updated", f"{_ts(r.get('updated_at'))} by {who(r.get('updated_by'))}"))
+        doc.kv(rrows, label_w=170, size=9)
+        if r.get("body"):
+            doc.para(r["body"], "R", 9.5, indent=12)
+        doc.space(4)
+
+    # ---- 6. check-ins
+    doc.heading("6. Net check-ins", _count(len(checkins), "check-in"))
+    doc.table([("Callsign", .11), ("Name", .14), ("Assignment", .17), ("Status", .1), ("Traffic", .09),
+               ("In (UTC)", .13), ("Out", .11), ("Notes", .15)],
+              [[c.get("callsign"), c.get("name"), c.get("assignment"), _nice(c.get("status")), _nice(c.get("traffic")),
+                _ts(c.get("created_at")), _ts(c.get("checked_out_at")) if c.get("checked_out_at") else "-",
+                c.get("notes")] for c in checkins])
+
+    # ---- 7. resources
+    doc.heading("7. Resources", "still assigned to this incident")
+    doc.table([("Resource", .22), ("Type", .12), ("Status", .12), ("Location", .18), ("Contact", .16), ("Notes", .2)],
+              [[r.get("name"), _nice(r.get("kind")), _nice(r.get("status")), r.get("location"), r.get("contact"),
+                r.get("notes")] for r in resources])
+
+    # ---- 8. chat
+    doc.heading("8. Incident chat", f"#incident-{iid}, " + _count(len(chat), "message"))
+    doc.table([("Time (UTC)", .17), ("From", .2), ("Message", .63)],
+              [[_ts(m["created_at"]), who(m.get("created_by")), m.get("body")] for m in chat])
+
+    # ---- 9. change history
+    doc.heading("9. Change history", "from the audit log")
+    doc.table([("Time (UTC)", .17), ("User", .18), ("Action", .1), ("Record", .17), ("Fields / detail", .38)],
+              [[_ts(h["ts"]), who(h.get("username")), h["action"], f"{h['entity']} #{h['entity_id']}", h.get("detail")]
+               for h in history])
+
+    # ---- 10. worksheet
+    doc.new_page()
+    doc.heading("10. Debrief worksheet", "fill in at the after-action meeting")
+    for label in ("Debrief date", "Facilitator", "Attendees"):
+        doc.space(22)
+        doc.text(doc.M, doc.y, label, "B", 9.5, MUTED_INK)
+        doc.hline(doc.y - 2, color=(0.7, 0.73, 0.78), x0=doc.M + 110)
+    doc.space(6)
+    for label, n in (("What went well", 4), ("What could be improved", 4), ("Communications and equipment issues", 3),
+                     ("Action items (what / who / by when)", 5)):
+        doc.lines_to_fill(label, n)
+    doc.ensure(60)
+    doc.space(44)
+    for x, w, label in ((doc.M, doc.inner * 0.5, "Debrief lead signature"),
+                        (doc.M + doc.inner * 0.62, doc.inner * 0.38, "Date")):
+        doc.hline(doc.y, color=INK, x0=x, x1=x + w, width=0.8)
+        doc.text(x, doc.y - 11, label, "R", 8.5, MUTED_INK)
+
+    slug = re.sub(r"[^a-z0-9]+", "-", (inc.get("title") or "incident").lower()).strip("-")[:40] or "incident"
+    return doc.render(f"TACISS {VERSION}"), f"debrief-incident-{iid}-{slug}.pdf"
+
+
+# --------------------------------------------------------------------------
 # HTTP handler
 # --------------------------------------------------------------------------
 class Handler(BaseHTTPRequestHandler):
@@ -2448,14 +3468,22 @@ class Handler(BaseHTTPRequestHandler):
             user = self.user_out(u)
             if user:
                 try:
-                    user["prefs"] = json.loads(u.get("prefs") or "{}")
+                    user["prefs"] = public_prefs(json.loads(u.get("prefs") or "{}"))
                 except ValueError:
                     user["prefs"] = {}
+                # the user's own program(s): shown in the top bar and dashboard so the board
+                # reads as "their" program's TACISS
+                ids = user.get("programs") or []
+                user["program_info"] = [dict(r) for r in self.con.execute(
+                    "SELECT id, name, kind, status, counties, region, coordinator, coordinator_call, frequencies "
+                    f"FROM programs WHERE id IN ({','.join('?' * len(ids))}) ORDER BY name", ids)] if ids else []
             return self.send_json({"user": user, "needs_setup": needs_setup,
                                    "public_read": CONFIG["public_read"], "version": VERSION,
                                    "update": UPDATES.notice() if u and u["role"] == "admin" else None})
         if head == "weather":
             return self.api_weather(method, parts[1:], qs)
+        if head == "aprs":
+            return self.api_aprs(method, parts[1:], qs)
         if head == "feeds":
             return self.api_feeds(method, parts[1:])
         if head == "reports" and len(parts) == 3 and parts[2] == "nws":
@@ -2658,9 +3686,183 @@ class Handler(BaseHTTPRequestHandler):
             prefs["wx_counties"] = sorted(set(c))
         if "wx_sound" in body:
             prefs["wx_sound"] = bool(body["wx_sound"])
+        refilter = False
+        if "aprs_ssid" in body:
+            v = str(body["aprs_ssid"] or "").strip().lstrip("-")
+            if v and not (v.isdigit() and 1 <= int(v) <= 15):
+                raise ApiError(400, "SSID must be blank or 1-15 (e.g. 9 for a mobile).")
+            prefs["aprs_ssid"] = v
+        if "aprs_passcode" in body:
+            v = str(body["aprs_passcode"] or "").strip()
+            if v:
+                call = (u.get("callsign") or "").upper()
+                if not CALL_RE.match(call):
+                    raise ApiError(400, "Your account has no amateur callsign yet. Ask an admin to add it "
+                                        "(Admin -> Users) before setting an APRS passcode.")
+                if not v.isdigit() or int(v) != aprs_passcode(call):
+                    raise ApiError(400, f"That isn't the APRS-IS passcode for {call}. Use the passcode you use "
+                                        "in your other APRS apps (APRSdroid, Xastir, etc.).")
+            prefs["aprs_passcode"] = v
+        if "aprs_symbol" in body:
+            v = str(body["aprs_symbol"] or "")
+            if v and v not in APRS_SYMBOLS:
+                raise ApiError(400, "Unknown symbol.")
+            prefs["aprs_symbol"] = v
+        if "aprs_comment" in body:
+            prefs["aprs_comment"] = aprs_clean(body["aprs_comment"], 43)
+        if "aprs_watch" in body:
+            w = body["aprs_watch"]
+            if not isinstance(w, list) or len(w) > 30:
+                raise ApiError(400, "Watch list must be up to 30 callsigns.")
+            w = sorted({str(c).strip().upper() for c in w if str(c).strip()})
+            bad = [c for c in w if not APRS_ADDR_RE.match(c.rstrip("*"))]
+            if bad:
+                raise ApiError(400, f"Not a callsign: {bad[0]}")
+            prefs["aprs_watch"] = w
+            refilter = True
         self.con.execute("UPDATE users SET prefs = ? WHERE id = ?", (json.dumps(prefs), u["id"]))
         self.con.commit()
-        self.send_json(prefs)
+        if refilter:
+            APRS.refilter()
+        self.send_json(public_prefs(prefs))
+
+    # ---- APRS -------------------------------------------------------------
+    def aprs_me(self, u):
+        """This user's APRS identity and whether they can send (with the reason if not)."""
+        try:
+            prefs = json.loads(u.get("prefs") or "{}")
+        except ValueError:
+            prefs = {}
+        call = (u.get("callsign") or "").upper().strip()
+        ssid = prefs.get("aprs_ssid") or ""
+        s = FeedService.settings()
+        reason = None
+        if s.get("aprs_tx_enabled") != "1":
+            reason = "An admin has turned off sending to APRS."
+        elif not CALL_RE.match(call):
+            reason = "Your account needs your amateur callsign. An admin adds it in Admin -> Users."
+        elif not prefs.get("aprs_passcode"):
+            reason = "Enter your APRS-IS passcode under My APRS setup."
+        elif int(prefs["aprs_passcode"]) != aprs_passcode(call):
+            reason = "Your saved passcode doesn't match your callsign any more. Enter it again."
+        me = {"callsign": call, "ssid": ssid, "from": call + (f"-{ssid}" if ssid else ""),
+              "symbol": prefs.get("aprs_symbol") or "/-", "comment": prefs.get("aprs_comment") or "",
+              "watch": prefs.get("aprs_watch") or [], "passcode_set": bool(prefs.get("aprs_passcode")),
+              "can_send": reason is None, "reason": reason}
+        return me, prefs
+
+    def api_aprs(self, method, rest, qs):
+        u = self.require("viewer")
+        sub = rest[0] if rest else ""
+        arg = lambda k, d="": (qs.get(k) or [d])[0]
+        if method == "GET" and sub == "status":
+            s = FeedService.settings()
+            with APRS.lock:
+                st = dict(APRS.status, stations=len(APRS.stations))
+            me, _ = self.aprs_me(u)
+            return self.send_json(dict(st, enabled=s.get("aprs_enabled") == "1", range_km=s.get("aprs_range_km"),
+                                       center=[float(s.get("map_lat") or 0), float(s.get("map_lon") or 0)],
+                                       aprsfi=bool(APRS.settings_secret("aprsfi_api_key")),
+                                       symbols=APRS_SYMBOLS, me=me))
+        if method == "GET" and sub == "stations":
+            try:
+                hours = float(arg("hours", "2"))
+            except ValueError:
+                hours = 2
+            return self.send_json(APRS.snapshot(hours))
+        if method == "GET" and sub == "packets":
+            with APRS.lock:
+                return self.send_json(list(APRS.packets)[-250:][::-1])
+        if method == "GET" and sub == "messages":
+            me, _ = self.aprs_me(u)
+            base = me["callsign"]
+            with APRS.lock:
+                msgs = list(APRS.messages)
+            acks = {(m["src"].split("-")[0], m["msgno"]) for m in msgs if m.get("ack") == "ack" and m.get("msgno")}
+            out = []
+            for m in msgs:
+                if m.get("ack"):
+                    continue
+                d = dict(m, acked=(m["to"].split("-")[0], m.get("msgno")) in acks if m.get("msgno") else None)
+                d["mine"] = bool(base) and base in (m["src"].split("-")[0], m["to"].split("-")[0])
+                out.append(d)
+            return self.send_json({"mine": [m for m in out if m["mine"]][::-1][:200],
+                                   "heard": [m for m in out if not m["to"].startswith(("BLN", "NWS"))][::-1][:150],
+                                   "bulletins": [m for m in out if m["to"].startswith(("BLN", "NWS"))][::-1][:50]})
+        if method == "GET" and sub == "lookup":
+            names = [n.strip().upper() for n in arg("name").split(",") if n.strip()][:20]
+            if not names or not all(re.fullmatch(r"[A-Z0-9\-_.]{1,12}", n) for n in names):
+                raise ApiError(400, "Enter up to 20 callsigns or object names, separated by commas.")
+            what = arg("what", "loc")
+            if what not in ("loc", "wx"):
+                raise ApiError(400, "what must be loc or wx.")
+            return self.send_json(APRS.aprsfi({"name": ",".join(names), "what": what}).get("entries", []))
+        if method == "GET" and sub == "inbox":
+            me, _ = self.aprs_me(u)
+            if not CALL_RE.match(me["callsign"]):
+                raise ApiError(400, "Your account has no amateur callsign yet.")
+            calls = sorted({me["callsign"], me["from"]})
+            return self.send_json(APRS.aprsfi({"what": "msg", "dst": ",".join(calls)}, ttl=30).get("entries", []))
+        if method == "POST" and sub == "send":
+            return self.api_aprs_send(u)
+        raise ApiError(404, "Not found.")
+
+    def api_aprs_send(self, u):
+        me, prefs = self.aprs_me(u)
+        if not me["can_send"]:
+            raise ApiError(400, me["reason"])
+        now = time.time()
+        recent = [t for t in APRS.last_tx.get(u["username"], []) if now - t < 3600]
+        if recent and now - recent[-1] < 10:
+            raise ApiError(429, "Please wait a few seconds between APRS packets.")
+        if len(recent) >= 60:
+            raise ApiError(429, "That's 60 APRS packets in the last hour. Please wait before sending more.")
+        body = self.read_json()
+        kind = body.get("type")
+        src = me["from"]
+        sym = body.get("symbol") or me["symbol"]
+        if sym not in APRS_SYMBOLS:
+            raise ApiError(400, "Unknown symbol.")
+        comment = aprs_clean(body.get("comment"), 43)
+        if kind in ("position", "object"):
+            try:
+                lat, lon = float(body.get("lat")), float(body.get("lon"))
+                assert -90 <= lat <= 90 and -180 <= lon <= 180
+            except (TypeError, ValueError, AssertionError):
+                raise ApiError(400, "Pick a location: enter latitude and longitude, or click the map.")
+            la, lo = aprs_coord(lat, lon)
+        if kind == "position":
+            payload = f"={la}{sym[0]}{lo}{sym[1]}{comment}"
+            label = src
+        elif kind == "object":
+            name = aprs_clean(body.get("name"), 9).strip()
+            if not name:
+                raise ApiError(400, "Give the object a name (up to 9 characters).")
+            stamp = datetime.now(timezone.utc).strftime("%d%H%Mz")
+            payload = f";{name:<9}{'_' if body.get('kill') else '*'}{stamp}{la}{sym[0]}{lo}{sym[1]}{comment}"
+            label = name
+        elif kind == "message":
+            to = str(body.get("to") or "").strip().upper()
+            if not (APRS_ADDR_RE.match(to) or re.fullmatch(r"BLN[0-9A-Z]{1,6}", to)):
+                raise ApiError(400, "Send to a callsign, e.g. KD4XYZ or KD4XYZ-9.")
+            text = aprs_clean(body.get("text"), 67).strip()
+            if not text:
+                raise ApiError(400, "Type a message (up to 67 characters).")
+            msgno = "" if to.startswith("BLN") else "{" + str(int(now) % 100000)
+            payload = f":{to:<9}:{text}{msgno}"
+            label = to
+        else:
+            raise ApiError(400, "type must be position, object or message.")
+        packet = f"{src}>{APRS_TOCALL},TCPIP*:{payload}"
+        try:
+            reply = APRS.send(src, prefs["aprs_passcode"], packet)
+        except OSError as e:
+            raise ApiError(502, f"Couldn't reach the APRS-IS server: {e}")
+        APRS.last_tx[u["username"]] = recent + [now]
+        self.audit("aprs_send", detail=packet)
+        self.con.commit()
+        return self.send_json({"ok": True, "packet": packet, "server": reply,
+                               "aprsfi": "https://aprs.fi/info/a/" + quote(label.strip())})
 
     # ---- weather ----------------------------------------------------------
     def api_weather(self, method, rest, qs):
@@ -3044,7 +4246,12 @@ class Handler(BaseHTTPRequestHandler):
                 raise ApiError(400, "mesh_interval must be 5-3600 seconds.")
             if k == "mesh_node_name":
                 v = v[:60]
-            if k in ("feeds_enabled", "mesh_enabled", "mesh_discoverable") and v not in ("0", "1"):
+            if k == "aprs_range_km" and not (v.isdigit() and 5 <= int(v) <= 2000):
+                raise ApiError(400, "aprs_range_km must be 5-2000.")
+            if k == "aprs_server" and not re.fullmatch(r"[A-Za-z0-9.-]+:\d{2,5}", v):
+                raise ApiError(400, "aprs_server must look like rotate.aprs2.net:14580")
+            if k in ("feeds_enabled", "mesh_enabled", "mesh_discoverable", "aprs_enabled", "aprs_tx_enabled") \
+                    and v not in ("0", "1"):
                 raise ApiError(400, f"{k} must be 0 or 1.")
             if k == "seoc_level" and v not in SEOC_LEVELS:
                 raise ApiError(400, "Invalid SEOC level.")
@@ -3070,6 +4277,8 @@ class Handler(BaseHTTPRequestHandler):
         if any(c.startswith("mesh_node_name=") for c in changed):
             mesh_refresh_name(self.con)
         self.con.commit()
+        if any(c.split("=")[0].startswith(("aprs", "map_lat", "map_lon")) for c in changed):
+            APRS.refilter()
         BUS.publish({"entity": "settings", "action": "update"})
         if any(c.startswith(("wx_states=", "wx_enabled=")) for c in changed):
             threading.Thread(target=WX.poll, daemon=True).start()  # refresh alerts for the new area now
@@ -3165,7 +4374,33 @@ class Handler(BaseHTTPRequestHandler):
         raise ApiError(405, "Method not allowed.")
 
     # ---- generic entities ---------------------------------------------------
+    def api_debrief(self, rid):
+        """GET /api/incidents/<id>/debrief.pdf - the debrief kit for a closed incident."""
+        u = self.require("viewer")
+        try:
+            iid = int(rid)
+        except ValueError:
+            raise ApiError(404, "Not found.")
+        row = self.con.execute("SELECT * FROM incidents WHERE id = ?", (iid,)).fetchone()
+        if not row or self.record_hidden("incidents", row):
+            raise ApiError(404, "Not found.")
+        if row["status"] != "closed":
+            raise ApiError(409, "The debrief kit is available once the incident is closed.")
+        pdf, name = build_debrief(self.con, dict(row), u, self.get_settings())
+        self.audit("debrief_pdf", "incidents", iid, name)
+        self.con.commit()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/pdf")
+        self.send_header("Content-Disposition", f'attachment; filename="{name}"')
+        self.send_header("Content-Length", str(len(pdf)))
+        self.send_header("Cache-Control", "no-store")
+        self.security_headers()
+        self.end_headers()
+        self.wfile.write(pdf)
+
     def api_entity(self, method, entity, rest, qs):
+        if entity == "incidents" and method == "GET" and len(rest) == 2 and rest[1] == "debrief.pdf":
+            return self.api_debrief(rest[0])
         spec = ENTITIES[entity]
         fields = {f["name"] for f in spec["fields"]}
         refs_fields = {f["name"] for f in spec["fields"] if f["type"] == "refs"}
@@ -3367,6 +4602,10 @@ def cmd_serve(args):
     httpd = Server((CONFIG["host"], CONFIG["port"]), Handler)
     WX.start()
     FEEDS.start()
+    if CONFIG["aprs"]:
+        APRS.start()
+    else:
+        APRS.status["error"] = "APRS is turned off for this server (TACISS_APRS=0)."
     MESH.start()
     DISCOVERY.start()
     UPDATES.start()

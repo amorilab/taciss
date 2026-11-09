@@ -16,7 +16,7 @@ def check(name, cond):
 
 data = tempfile.mkdtemp(prefix="taciss-disc-")
 fakebin = tempfile.mkdtemp(prefix="taciss-fakebin-")
-env = dict(os.environ, TACISS_DATA=data)
+env = dict(os.environ, TACISS_DATA=data, TACISS_APRS="0")
 srv = subprocess.Popen([sys.executable, "-u", APP, "serve", "--port", str(PORT), "--host", "127.0.0.1"], env=env,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 try:

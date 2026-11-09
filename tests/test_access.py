@@ -4,7 +4,7 @@ import json, os, shutil, subprocess, sys, tempfile, threading, time, urllib.requ
 APP = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "app", "taciss.py")
 PORT = 8097
 data = tempfile.mkdtemp(prefix="taciss-acl-")
-env = dict(os.environ, TACISS_DATA=data)
+env = dict(os.environ, TACISS_DATA=data, TACISS_APRS="0")
 PW = "correct-horse-1"
 
 

@@ -121,7 +121,13 @@ function tickClocks() {
 function renderChrome() {
   const st = S.settings;
   document.getElementById('site-name').textContent = st.site_name || 'TACISS';
-  document.title = st.site_name || 'TACISS';
+  // The signed-in user's program under the name, so it reads as their program's board
+  const mine = (S.me && S.me.program_info) || [];
+  const pe = document.getElementById('site-program');
+  pe.hidden = !mine.length;
+  pe.textContent = mine.length ? mine[0].name + (mine.length > 1 ? ` +${mine.length - 1}` : '') : '';
+  pe.title = mine.map((p) => p.name).join('\n');
+  document.title = (mine.length ? mine[0].name + ' · ' : '') + (st.site_name || 'TACISS');
   const lvl = st.seoc_level || 'normal';
   const bar = document.getElementById('status-bar');
   bar.className = 'status-bar lvl-' + lvl;
@@ -162,6 +168,7 @@ function renderChrome() {
     ['agencies', 'Agencies', canRead('agencies')],
     ['resources', 'Resources', canRead('resources')],
     ['chat', 'Chat', canRead('messages')],
+    ['aprs', '📡 APRS', !!S.me],
     ['mesh', '🕸 Mesh', can('admin')],
     ['admin', 'Admin', can('admin')],
   ];
@@ -432,21 +439,33 @@ VIEWS.login = async (root) => {
   const u = h('input', { name: 'username', autocomplete: 'username', required: true });
   const p = h('input', { name: 'password', type: 'password', autocomplete: 'current-password', required: true });
   const err = h('div', { class: 'err' });
-  root.append(h('div', { class: 'card login' },
-    h('h2', {}, 'Sign in'),
-    h('p', { class: 'muted' }, S.settings.org_name || ''),
-    h('form', { onsubmit: async (e) => {
-      e.preventDefault();
-      try {
-        const r = await api('POST', 'login', { username: u.value, password: p.value });
-        S.me = r.user; S.cache = {}; loadNodes();
-        const me = await api('GET', 'me').catch(() => null);
-        if (me && me.user) { S.me = me.user; S.update = me.update; } // includes saved weather prefs
-        connectStream();
-        refreshWx(false);
-        location.hash = '#/dashboard';
-      } catch (ex) { err.textContent = ex.message; }
-    } }, h('label', {}, 'Username', u), h('label', {}, 'Password', p), h('button', { class: 'primary' }, 'Sign in'), err)));
+  const btn = h('button', { class: 'primary' }, 'Sign in');
+  root.append(h('div', { class: 'login-page' },
+    h('div', { class: 'login-brand' },
+      h('img', { src: '/static/logo-512.png?v=5', alt: 'TACISS: Tactical Amateur Communication Information Sharing System', width: 190, height: 190 }),
+      h('div', { class: 'login-name' }, S.settings.site_name || 'TACISS'),
+      h('div', { class: 'muted' }, S.settings.org_name || '')),
+    h('div', { class: 'card login' },
+      h('h2', {}, 'Sign in'),
+      h('form', { onsubmit: async (e) => {
+        e.preventDefault();
+        err.textContent = '';
+        btn.disabled = true;
+        try {
+          const r = await api('POST', 'login', { username: u.value, password: p.value });
+          S.me = r.user; S.cache = {}; loadNodes();
+          const me = await api('GET', 'me').catch(() => null);
+          if (me && me.user) { S.me = me.user; S.update = me.update; } // includes saved weather prefs
+          connectStream();
+          refreshWx(false);
+          // Go to the page they asked for (or the dashboard). Setting the hash to the value it
+          // already has fires no hashchange, so render directly in that case.
+          const target = route().view === 'login' ? '#/dashboard' : (location.hash || '#/dashboard');
+          if (location.hash !== target) location.hash = target;
+          else render();
+        } catch (ex) { err.textContent = ex.message; btn.disabled = false; }
+      } }, h('label', {}, 'Username', u), h('label', {}, 'Password', p), btn, err)),
+    h('footer', { class: 'login-footer' }, '© 2026 AmoriLabs - W3FDE')));
 };
 
 VIEWS.setup = async (root) => {
@@ -485,6 +504,16 @@ VIEWS.dashboard = async (root) => {
   const active = inc.filter((i) => i.status !== 'closed');
   const day = rep.filter((r) => Date.now() - new Date(r.created_at) < 864e5);
   const stat = (n, l, tone) => h('div', { class: 'card stat' }, h('div', { class: 'n c-' + tone }, n), h('div', { class: 'l' }, l));
+  // Banner for the user's own program(s) (assigned in Admin → Users)
+  const mine = S.me ? prog.filter((p) => (S.me.programs || []).includes(p.id))
+    .sort((a, b) => String(a.name).localeCompare(String(b.name))) : [];
+  if (mine.length) root.append(h('div', { class: 'program-hero' }, mine.map((p) =>
+    h('div', { class: 'ph-item', title: 'Open program details', onclick: () => editRecord('programs', p) },
+      h('div', { class: 'ph-kicker' }, (p.kind || 'Program') + (mine.length > 1 ? ' · One of your programs' : ' · Your program')),
+      h('div', { class: 'ph-name' }, p.name, ' ', badge(p.status)),
+      h('div', { class: 'ph-meta' }, [p.counties && 'Counties: ' + p.counties, p.region && 'Region: ' + p.region,
+        p.coordinator && `Coordinator: ${p.coordinator} ${p.coordinator_call || ''}`.trim(),
+        p.frequencies && 'Frequencies: ' + p.frequencies].filter(Boolean).join('  ·  '))))));
   root.append(h('div', { class: 'stats' },
     stat(active.length, 'Open incidents', active.length ? 'bad' : 'ok'),
     stat(day.length, 'Reports (24h)', day.length ? 'warn' : 'ok'),
@@ -640,6 +669,8 @@ async function incidentDetail(root, id) {
     h('div', { class: 'toolbar' }, h('a', { href: '#/incidents', class: 'btn no-print' }, '← Incidents'),
       h('h2', {}, lockIcon(inc), isLocked(inc) ? ' ' : '', inc.title, ' ', badge(inc.status)),
       canRead('messages') ? h('a', { class: 'btn no-print', href: '#/chat/incident-' + id }, '💬 Incident chat') : null,
+      S.me && inc.status === 'closed' ? h('a', { class: 'btn primary no-print', href: `/api/incidents/${id}/debrief.pdf`,
+        download: '', title: 'Download a PDF packet of everything recorded for this incident' }, '📄 Debrief kit (PDF)') : null,
       S.me && canDo('reports', 'create') ? h('button', { onclick: () => editRecord('reports', null, { incident_id: id, lat: inc.lat, lon: inc.lon }) }, '+ Report') : null,
       h('button', { class: canDo('incidents', 'edit') ? 'primary' : '', onclick: () => editRecord('incidents', inc) }, canDo('incidents', 'edit') ? 'Edit' : 'Details')),
     h('div', { class: 'grid cols-2' },
@@ -828,9 +859,12 @@ VIEWS.admin = async (root) => {
     ['feeds_enabled', 'War-room live feeds on (1) / off (0)'], ['lsr_hours', 'Storm reports: hours to show (1-168)'],
     ['feeds_bbox', 'Spotter Network area: south,west,north,east'], ['nws_report_email', 'NWS spotter-report e-mail (your office)'],
     ['windy_api_key', 'Windy.com webcams API key (free, api.windy.com)'], ['tdot_api_key', 'TDOT SmartWay camera API key (from TDOT)'],
-    ['nws_report_links', 'Report-to-NWS links (one per line: Name|https://…)'], ['outage_links', 'Outage map links (one per line: Name|https://…)']];
+    ['nws_report_links', 'Report-to-NWS links (one per line: Name|https://…)'], ['outage_links', 'Outage map links (one per line: Name|https://…)'],
+    ['aprs_enabled', 'APRS live feed on (1) / off (0)'], ['aprs_range_km', 'APRS area radius around map center (km)'],
+    ['aprs_server', 'APRS-IS server (host:port)'], ['aprs_tx_enabled', 'Let users send to APRS on (1) / off (0)'],
+    ['aprsfi_api_key', 'aprs.fi API key (free, aprs.fi → Account)'], ['aprs_filter_extra', 'Extra APRS-IS filter (advanced)']];
   const MULTI = new Set(['nws_report_links', 'outage_links']);
-  const SECRET = new Set(['windy_api_key', 'tdot_api_key']);
+  const SECRET = new Set(['windy_api_key', 'tdot_api_key', 'aprsfi_api_key']);
   const sform = h('form', { class: 'grid-form card-body', onsubmit: async (e) => {
     e.preventDefault();
     const body = Object.fromEntries(keys.map(([k]) => [k, sform.elements[k].value]));
@@ -964,6 +998,7 @@ function connectStream() {
       return;
     }
     if (ev.entity === 'weather') { refreshWx(true); return; }
+    if (ev.entity === 'aprs') { if (S.aprsRefresh) S.aprsRefresh(); return; }
     if (ev.entity === 'mesh') {
       if (ev.action === 'pair') loadNodes();
       if (route().view === 'mesh') { clearTimeout(renderTimer); renderTimer = setTimeout(render, 400); }
@@ -985,6 +1020,10 @@ function connectStream() {
       return;
     }
     delete S.cache[ev.entity];
+    if (ev.entity === 'programs' && S.me && (S.me.programs || []).includes(Number(ev.id))) {
+      const me = await api('GET', 'me').catch(() => null); // my program was renamed/edited: refresh the top bar
+      if (me && me.user) { S.me = me.user; renderChrome(); }
+    }
     const key = ev.entity + ':' + ev.id;
     if (ev.action === 'create' && !S.mine.has(key)) {
       if (ev.entity === 'incidents') toast('⚠ New incident opened');

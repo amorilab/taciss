@@ -4,7 +4,7 @@
 
 # TACISS — self-hosted
 
-**Tactical Communications & Incident Situational Sharing.** This is an incident and information-sharing board for emergency management and auxiliary communications groups (ARES, RACES, Skywarn, CERT). It runs on your own Debian 13 machine and keeps working without internet. When you want, you can also put it online at your own domain.
+**Tactical Amateur Communication Information Sharing System.** This is an incident and information-sharing board for emergency management and auxiliary communications groups (ARES, RACES, Skywarn, CERT). It runs on your own Debian 13 machine and keeps working without internet. When you want, you can also put it online at your own domain.
 
 | | |
 |---|---|
@@ -286,6 +286,32 @@ A full scan runs every 2 minutes, or click **⌕ Look now**. To keep a node from
 - Easiest is the ready-made Pi image (Option 3). On a Pi that already runs Raspberry Pi OS, use Option 2 (`sudo bash deploy/install.sh`). TACISS is pure Python, so the same files run on the Pi's ARM processor.
 - A Pi has no battery-backed clock. TACISS orders edits with a hybrid clock, so a wrong clock won't scramble the order of edits. The Mesh page still warns you when a peer's clock is more than 2 minutes off. Install `fake-hwclock` and `chrony`, or add a GPS or RTC hat for field kits.
 - On AREDN, plug the Pi into the node's LAN port. Set `mesh_url` to its `*.local.mesh` hostname and port, and advertise it as a service with "TACISS" in the name so other nodes find it.
+
+## APRS
+
+The **📡 APRS** tab shows live APRS traffic around your map center, gives you aprs.fi lookups, and lets each user send to APRS under their own callsign.
+
+- **Live map and station list.** TACISS keeps one read-only connection to the APRS-IS network (the internet side of APRS) for everything within **APRS area radius** km of the map center (default 150). You see positions, mobiles with speed and heading, weather stations, objects, status text and messages. It updates live. Click any station for details and an aprs.fi link.
+- **aprs.fi lookups.** Look up any callsign's last position or weather, anywhere in the world. An admin adds a free aprs.fi API key in **Admin → Settings** (aprs.fi → Account → API key).
+- **Sending.** Users can send **their position**, an **object** (a shelter, staging area or hazard, with its own name; objects can be filled from an open incident and later removed), or an **APRS message** to another station. Whatever you send goes into APRS-IS and shows on aprs.fi within seconds. aprs.fi itself has no way to accept data; every APRS app sends through APRS-IS.
+
+To send, a user needs:
+
+1. their **amateur callsign** on their TACISS account (an admin sets it in **Admin → Users**), and
+2. their **APRS-IS passcode**, entered once under **My APRS setup** on the APRS tab. It's the same passcode APRSdroid, Xastir and other apps use. TACISS checks it against the callsign, keeps it on the server, and never shows it again.
+
+Packets sent through APRS-IS can be gated to RF by igates, so only licensed amateurs may send, under their own callsign, with plain-language amateur traffic. Sends are limited to one every 10 seconds and 60 an hour per user, and each one is recorded in the audit log. Admins can turn sending off (**Let users send to APRS** = 0) or turn APRS off entirely (**APRS live feed** = 0, or `TACISS_APRS=0` in `/etc/taciss/taciss.env` on networks that must not reach the internet).
+
+## Incident debrief kit
+
+When an incident is **closed**, its page shows a **📄 Debrief kit (PDF)** button. It downloads one PDF packet with everything recorded for that incident:
+
+- a cover page with the key facts, then the incident details, assigned programs and served agencies
+- everyone involved: the TACISS users who entered information, and the stations on the net
+- one combined timeline, oldest first, followed by the full activity log, reports, net check-ins, assigned resources, incident chat and change history
+- a blank debrief worksheet (what went well, what to improve, comms issues, action items, sign-off) for the after-action meeting
+
+Any signed-in user who can see the incident can download it. Restricted incidents stay restricted, and their packet is marked **RESTRICTED** on the cover. Each download is recorded in the audit log. The PDF is built by TACISS itself, so it works offline. All times in it are UTC.
 
 ## Offline maps
 
