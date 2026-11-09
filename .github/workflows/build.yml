@@ -131,9 +131,15 @@ jobs:
           compression-level: 0
           retention-days: 7
 
+  iso-vm:
+    name: Install the ISO in a VM and check TACISS starts
+    needs: lint
+    if: startsWith(github.ref, 'refs/tags/')
+    uses: ./.github/workflows/iso-test.yml
+
   release:
     name: Publish GitHub Release
-    needs: [pi-image, iso]
+    needs: [pi-image, iso, iso-vm]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:

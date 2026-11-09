@@ -47,6 +47,8 @@ Everything you download is on the **[Releases page](https://github.com/amorilab/
 
 **You need:** a 64-bit PC, mini PC or virtual machine with at least 1 GB of RAM and 8 GB of disk, an Ethernet connection **with internet** during the install, and a USB stick (4 GB or larger).
 
+**Using a virtual machine** (VirtualBox, Hyper-V, Proxmox, VMware)? Give it a network adapter with internet access (NAT is fine) and a 16 GB or larger disk. Then attach the ISO as its CD/DVD drive.
+
 > ⚠ **This erases the computer's disk.** Use a machine you don't need anything from.
 
 1. **Download** `taciss-<version>-installer-amd64.iso` from the [Releases page](https://github.com/amorilab/taciss/releases/latest).
