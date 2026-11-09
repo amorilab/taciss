@@ -1,0 +1,31 @@
+[Unit]
+Description=TACISS incident information sharing server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=taciss
+Group=taciss
+EnvironmentFile=/etc/taciss/taciss.env
+ExecStart=/usr/bin/python3 /opt/taciss/app/taciss.py serve
+Restart=always
+RestartSec=3
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+ReadWritePaths=/var/lib/taciss /var/backups/taciss
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

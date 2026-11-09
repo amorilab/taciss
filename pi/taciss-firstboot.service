@@ -1,0 +1,15 @@
+[Unit]
+Description=Install TACISS on first boot
+ConditionPathExists=/opt/taciss-src/.firstboot
+# Let Raspberry Pi Imager settings (user, hostname, Wi-Fi) apply first
+After=network.target systemd-hostnamed.service cloud-init.service cloud-config.service
+Wants=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/taciss-firstboot
+RemainAfterExit=yes
+TimeoutStartSec=600
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,9 @@
+[Unit]
+Description=TACISS database backup
+
+[Service]
+Type=oneshot
+User=taciss
+Group=taciss
+EnvironmentFile=/etc/taciss/taciss.env
+ExecStart=/bin/sh -c 'python3 /opt/taciss/app/taciss.py backup /var/backups/taciss/taciss-$(date +%%Y%%m%%d-%%H%%M).db && find /var/backups/taciss -name "taciss-*.db" -mtime +14 -delete'

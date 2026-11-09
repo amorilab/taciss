@@ -1,0 +1,164 @@
+# Every push: check the code and test a real install on Debian 13.
+# Every version tag (v1.2.3): also build the Raspberry Pi image and the PC installer ISO
+# and publish them as a GitHub Release. Make a release with scripts/release.ps1 (or .sh).
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      images:
+        description: Also build the Pi image and ISO (no release is published)
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Python compiles
+        run: python3 -m py_compile app/taciss.py
+      - name: JavaScript parses
+        run: for f in app/static/*.js; do node --check "$f"; done
+      - name: Shell scripts parse
+        run: for f in deploy/install.sh deploy/taciss-cli deploy/taciss-update deploy/taciss-issue pi/*.sh iso/*.sh scripts/*.sh; do bash -n "$f"; done
+      - name: Version tag matches app/taciss.py
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          V=$(sed -n 's/^VERSION = "\(.*\)"/\1/p' app/taciss.py)
+          [ "v$V" = "$GITHUB_REF_NAME" ] || { echo "::error::tag $GITHUB_REF_NAME but app/taciss.py says $V"; exit 1; }
+
+  debian13:
+    name: Install and test on Debian 13
+    runs-on: ubuntu-latest
+    container: debian:trixie
+    steps:
+      - name: Base system (python3 is the only thing TACISS needs)
+        run: |
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends python3 systemd ca-certificates >/dev/null
+          . /etc/os-release && echo "$PRETTY_NAME, $(python3 --version)"
+      - uses: actions/checkout@v4
+      - name: Install like a real server
+        run: bash deploy/install.sh
+      - name: Server starts and answers
+        run: |
+          runuser -u taciss -- env TACISS_DATA=/var/lib/taciss python3 /opt/taciss/app/taciss.py serve --port 8080 > /tmp/taciss.log 2>&1 &
+          python3 - <<'PY'
+          import json, time, urllib.request
+          for _ in range(40):
+              try:
+                  me = json.load(urllib.request.urlopen("http://127.0.0.1:8080/api/me", timeout=2)); break
+              except OSError:
+                  time.sleep(0.5)
+          else:
+              raise SystemExit(open("/tmp/taciss.log").read())
+          assert me["needs_setup"] is True, me
+          page = urllib.request.urlopen("http://127.0.0.1:8080/").read().decode()
+          assert "TACISS" in page
+          print("OK: TACISS", me["version"], "is serving and waiting for first-time setup")
+          PY
+          test -n "$(taciss setup-code --quiet)" && echo "OK: setup code exists"
+          kill $! || true
+      - name: Test suites
+        run: |
+          python3 tests/test_access.py
+          python3 tests/test_mesh.py
+          python3 tests/test_discovery.py
+      - name: Offline update from a release file keeps data
+        run: |
+          mkdir -p /tmp/rel/taciss-9.9.9
+          cp -r app deploy README.md /tmp/rel/taciss-9.9.9/
+          sed -i 's/^VERSION = ".*"/VERSION = "9.9.9"/' /tmp/rel/taciss-9.9.9/app/taciss.py
+          tar -czf /tmp/rel/taciss-9.9.9.tar.gz -C /tmp/rel taciss-9.9.9
+          (cd /tmp/rel && sha256sum taciss-9.9.9.tar.gz > SHA256SUMS)
+          taciss update /tmp/rel/taciss-9.9.9.tar.gz
+          grep -q 'VERSION = "9.9.9"' /opt/taciss/app/taciss.py
+          ls /var/backups/taciss/before-9.9.9-*.db
+          test -n "$(taciss setup-code --quiet)"
+          echo "OK: updated to 9.9.9, database backed up and kept"
+
+  pi-image:
+    name: Raspberry Pi image
+    needs: [lint, debian13]
+    if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.images)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo bash pi/build-pi-image.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pi-image
+          path: dist/*.img.xz
+          compression-level: 0
+          retention-days: 7
+
+  iso:
+    name: PC installer ISO
+    needs: [lint, debian13]
+    if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.images)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build (netinst flavor - the 4 GB DVD flavor is over GitHub's 2 GB file limit)
+        run: docker run --rm -e FLAVOR=netinst -v "$PWD":/src debian:trixie bash /src/iso/build-iso.sh
+      - name: Name it after the TACISS version
+        run: |
+          V=$(sed -n 's/^VERSION = "\(.*\)"/\1/p' app/taciss.py)
+          sudo mv dist/taciss-*-netinst-amd64.iso "dist/taciss-$V-installer-amd64.iso"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: iso
+          path: dist/*.iso
+          compression-level: 0
+          retention-days: 7
+
+  release:
+    name: Publish GitHub Release
+    needs: [pi-image, iso]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Source package (used by `sudo taciss update`) and checksums
+        run: |
+          V="${GITHUB_REF_NAME#v}"
+          git archive --format=tar.gz --prefix="taciss-$V/" -o "dist/taciss-$V.tar.gz" "$GITHUB_REF_NAME"
+          cd dist && sha256sum * > SHA256SUMS && cat SHA256SUMS
+      - name: Release notes
+        run: |
+          V="${GITHUB_REF_NAME#v}"
+          cat > notes.md <<EOF
+          ## Downloads
+
+          | File | What it's for |
+          |---|---|
+          | \`taciss-$V-raspberrypi-arm64.img.xz\` | **Raspberry Pi** 3, 4, 5, 400, Zero 2 W. Write it to a microSD card with Raspberry Pi Imager, put it in the Pi, power on. |
+          | \`taciss-$V-installer-amd64.iso\` | **PC / server / VM.** Debian 13 + TACISS automated installer. Write to USB with Rufus (DD mode) or balenaEtcher. Needs internet during install. |
+          | \`taciss-$V.tar.gz\` | Install on an existing Debian 13 machine, or update offline. |
+
+          First time? Follow [INSTALL.md](https://github.com/${{ github.repository }}/blob/$GITHUB_REF_NAME/INSTALL.md).
+
+          **Already running TACISS?** Update with \`sudo taciss update\` (keeps your data, backs up the database first).
+
+          EOF
+          sed -i 's/^          //' notes.md
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --title "TACISS ${GITHUB_REF_NAME#v}" --notes-file notes.md --generate-notes

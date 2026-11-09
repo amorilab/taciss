@@ -1,0 +1,13 @@
+# /etc/caddy/Caddyfile  —  sudo apt install caddy   (Caddy is in Debian 13 main)
+# Gets a free Let's Encrypt certificate automatically. Needs:
+#   * a DNS A/AAAA record for the name below pointing at your public IP
+#   * router port-forward of TCP 80 and 443 to this machine
+# Then in /etc/taciss/taciss.env set TACISS_TRUST_PROXY=1 and restart taciss.
+
+taciss.example.com {
+	encode gzip
+	reverse_proxy 127.0.0.1:8080 {
+		# keep the live-update stream flowing
+		flush_interval -1
+	}
+}

@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Wrapper so admins can run: sudo taciss create-user bob --role operator
+set -euo pipefail
+set -a; [[ -r /etc/taciss/taciss.env ]] && . /etc/taciss/taciss.env; set +a
+export TACISS_DATA="${TACISS_DATA:-/var/lib/taciss}"
+if [[ "${1:-}" == update ]]; then shift; exec /usr/local/sbin/taciss-update "$@"; fi
+if [[ $EUID -eq 0 ]]; then
+  exec runuser -u taciss -- env TACISS_DATA="$TACISS_DATA" python3 /opt/taciss/app/taciss.py "$@"
+fi
+exec python3 /opt/taciss/app/taciss.py "$@"

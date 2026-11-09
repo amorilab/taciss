@@ -1,0 +1,9 @@
+data/
+dist/
+iso/cache/
+__pycache__/
+*.pyc
+*.db
+*.db-wal
+*.db-shm
+pi/cache/

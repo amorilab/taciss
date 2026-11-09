@@ -1,0 +1,10 @@
+[Unit]
+Description=Show TACISS address and setup code on the console login screen
+Before=getty@tty1.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/taciss-issue
+
+[Install]
+WantedBy=multi-user.target

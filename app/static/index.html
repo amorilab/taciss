@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TACISS</title>
+<link rel="stylesheet" href="/static/vendor/leaflet/leaflet.css">
+<link rel="stylesheet" href="/static/style.css?v=12">
+<link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="#/dashboard">
+    <img src="/static/icon.svg" alt="" width="28" height="28">
+    <span id="site-name">TACISS</span>
+  </a>
+  <div class="clocks">
+    <span id="clock-local">--:--:--</span>
+    <span id="clock-utc" title="UTC / Zulu">--:--:--Z</span>
+  </div>
+  <div id="status-bar" class="status-bar lvl-normal">
+    <span id="status-text">STATUS NORMAL</span>
+    <span id="status-banner"></span>
+    <span id="status-control"></span>
+  </div>
+  <div class="top-actions">
+    <span id="conn" class="conn off" title="Live updates disconnected"></span>
+    <button id="theme-btn" class="ghost" title="Toggle light/dark">◐</button>
+    <div id="user-box"></div>
+  </div>
+</header>
+<nav id="nav" class="nav"></nav>
+<div id="ticker" class="ticker" hidden></div>
+<main id="view" class="view"><p class="muted pad">Loading…</p></main>
+<div id="toasts" class="toasts" aria-live="polite"></div>
+<script src="/static/vendor/leaflet/leaflet.js"></script>
+<script src="/static/app.js?v=12"></script>
+<script src="/static/weather.js?v=6"></script>
+<script src="/static/warroom.js?v=1"></script>
+<script src="/static/mesh.js?v=3"></script>
+</body>
+</html>

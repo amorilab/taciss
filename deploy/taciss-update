@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+# Update TACISS from a GitHub release (or a release .tar.gz copied over by USB).
+#
+#   sudo taciss update                 # newest release from GitHub
+#   sudo taciss update --check         # just say whether there's a newer one
+#   sudo taciss update taciss-1.2.0.tar.gz   # offline: install a downloaded release
+#
+# Your data and settings are kept, and the database is backed up first.
+set -euo pipefail
+
+set -a; [[ -r /etc/taciss/taciss.env ]] && . /etc/taciss/taciss.env; set +a
+REPO="${TACISS_REPO:-amorilab/taciss}"
+INSTALLED=$(sed -n 's/^VERSION = "\(.*\)"/\1/p' /opt/taciss/app/taciss.py 2>/dev/null || true)
+
+die() { echo "taciss update: $*" >&2; exit 1; }
+newer() { # is $1 a higher version than $2?
+  [[ "$1" != "$2" ]] && [[ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n1)" == "$1" ]]
+}
+fetch() { # url -> file, with python3 so curl/wget aren't needed
+  python3 - "$1" "$2" <<'PY'
+import sys, urllib.request
+req = urllib.request.Request(sys.argv[1], headers={"User-Agent": "taciss-update", "Accept": "*/*"})
+with urllib.request.urlopen(req, timeout=60) as r, open(sys.argv[2], "wb") as f:
+    while True:
+        b = r.read(1 << 16)
+        if not b:
+            break
+        f.write(b)
+PY
+}
+
+CHECK=0
+FILE=""
+for a in "$@"; do
+  case "$a" in
+    --check) CHECK=1 ;;
+    -h|--help) sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) FILE="$a" ;;
+  esac
+done
+
+WORK=$(mktemp -d)
+trap 'rm -rf "$WORK"' EXIT
+
+if [[ -z "$FILE" ]]; then
+  echo "==> Checking https://github.com/$REPO for a new release (installed: ${INSTALLED:-none})"
+  fetch "https://api.github.com/repos/$REPO/releases/latest" "$WORK/latest.json" \
+    || die "can't reach GitHub. No internet? Copy a release .tar.gz over and run: sudo taciss update FILE"
+  read -r TAG LATEST < <(python3 -c 'import json,sys; t=json.load(open(sys.argv[1]))["tag_name"]; print(t, t.lstrip("v"))' "$WORK/latest.json")
+  if ! newer "$LATEST" "${INSTALLED:-0}"; then
+    echo "    Up to date ($INSTALLED)."
+    exit 0
+  fi
+  echo "    New version available: $LATEST"
+  [[ $CHECK == 1 ]] && exit 0
+  [[ $EUID -eq 0 ]] || die "run with sudo to install it"
+  BASE="https://github.com/$REPO/releases/download/$TAG"
+  echo "==> Downloading taciss-$LATEST.tar.gz"
+  fetch "$BASE/taciss-$LATEST.tar.gz" "$WORK/taciss-$LATEST.tar.gz" || die "download failed"
+  fetch "$BASE/SHA256SUMS" "$WORK/SHA256SUMS" || die "couldn't download SHA256SUMS"
+  (cd "$WORK" && grep " taciss-$LATEST.tar.gz\$" SHA256SUMS | sha256sum -c --quiet -) || die "checksum mismatch - not installing"
+  echo "    checksum OK"
+  FILE="$WORK/taciss-$LATEST.tar.gz"
+else
+  [[ $EUID -eq 0 ]] || die "run with sudo"
+  [[ -f "$FILE" ]] || die "no such file: $FILE"
+  if [[ -f "$FILE.sha256" ]]; then
+    (cd "$(dirname "$FILE")" && sha256sum -c --quiet "$(basename "$FILE").sha256") || die "checksum mismatch"
+    echo "    checksum OK"
+  elif [[ -f "$(dirname "$FILE")/SHA256SUMS" ]]; then
+    (cd "$(dirname "$FILE")" && grep " $(basename "$FILE")\$" SHA256SUMS | sha256sum -c --quiet -) || die "checksum mismatch"
+    echo "    checksum OK"
+  else
+    echo "    (no SHA256SUMS next to the file - skipping checksum)"
+  fi
+fi
+
+echo "==> Unpacking"
+tar -xzf "$FILE" -C "$WORK"
+SRC=$(find "$WORK" -mindepth 2 -maxdepth 2 -name deploy -type d | head -n1)
+[[ -n "$SRC" && -f "$SRC/install.sh" && -f "$(dirname "$SRC")/app/taciss.py" ]] || die "that file isn't a TACISS release"
+SRC=$(dirname "$SRC")
+NEW=$(sed -n 's/^VERSION = "\(.*\)"/\1/p' "$SRC/app/taciss.py")
+
+if [[ -n "$INSTALLED" ]]; then
+  echo "==> Backing up the database"
+  install -d -o taciss -g taciss -m 0750 /var/backups/taciss
+  taciss backup "/var/backups/taciss/before-$NEW-$(date +%Y%m%d-%H%M%S).db" \
+    || die "backup failed - not updating"
+fi
+
+echo "==> Installing TACISS $NEW (was ${INSTALLED:-not installed})"
+bash "$SRC/deploy/install.sh" </dev/null
+echo "==> Updated to $NEW. To go back: the previous version is in /opt/taciss/app.old"

@@ -1,0 +1,18 @@
+#!/bin/sh
+# Writes the TACISS address (and the first-time setup code, while one exists)
+# onto the console login screen, so an operator at the box can see where to browse.
+PORT=$(grep -E '^TACISS_PORT=' /etc/taciss/taciss.env 2>/dev/null | cut -d= -f2)
+PORT=${PORT:-8080}
+CODE=$(cat /var/lib/taciss/setup-code 2>/dev/null)
+mkdir -p /etc/issue.d
+{
+  printf '%s\n' "=================================================================="
+  printf '%s\n' "  TACISS incident information sharing server"
+  # agetty expands \4 (IPv4 address) and \n (hostname) when it draws the login prompt
+  printf '  Web:  http://\\4:%s     or  http://\\n.local:%s\n' "$PORT" "$PORT"
+  if [ -n "$CODE" ]; then
+    printf '\n  FIRST-TIME SETUP CODE:  %s\n' "$CODE"
+    printf '%s\n' "  Open the web address above and create the first admin account."
+  fi
+  printf '%s\n\n' "=================================================================="
+} > /etc/issue.d/taciss.issue
