@@ -1,0 +1,99 @@
+name: Test installer ISO in a VM
+
+# Boots the PC installer ISO in QEMU/KVM, runs the full automated install,
+# then boots the installed disk and checks TACISS answers on port 8080.
+# The installer's syslog is streamed to the runner and uploaded as an artifact.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag whose ISO to test (empty = build from this commit)"
+        required: false
+        default: ""
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  vm-install:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tools + KVM
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-system-x86 qemu-utils xorriso >/dev/null
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm.rules
+          sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+
+      - name: Get ISO (release)
+        if: ${{ inputs.tag != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "${{ inputs.tag }}" -p '*installer-amd64.iso' -O taciss.iso
+
+      - name: Get ISO (build)
+        if: ${{ inputs.tag == '' }}
+        run: |
+          sudo docker run --rm -v "$PWD:/w" -w /w -e FLAVOR=netinst debian:trixie bash iso/build-iso.sh
+          sudo mv dist/taciss-*-netinst-amd64.iso taciss.iso
+          sudo chown "$USER" taciss.iso
+
+      - name: Automated install in a VM
+        run: |
+          xorriso -osirrox on -indev taciss.iso \
+            -extract /install.amd/vmlinuz vmlinuz -extract /install.amd/initrd.gz initrd.gz >/dev/null 2>&1
+          qemu-img create -f qcow2 disk.qcow2 16G
+          # receive the installer's syslog (log_host/log_port boot options)
+          python3 -u -c '
+          import socket,sys
+          s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.bind(("0.0.0.0",5140))
+          f=open("installer-syslog.log","ab",0)
+          while True: f.write(s.recv(65535)+b"\n")
+          ' &
+          set +e
+          # Same options as the ISO's "TACISS server" boot entry, plus the account password
+          # (normally typed by a person) and remote logging.
+          timeout 45m qemu-system-x86_64 -enable-kvm -m 2048 -smp 2 \
+            -cdrom taciss.iso -drive file=disk.qcow2,if=virtio \
+            -kernel vmlinuz -initrd initrd.gz \
+            -append "auto=true priority=high preseed/file=/cdrom/taciss/iso/preseed.cfg passwd/user-password=ci-test-pw passwd/user-password-again=ci-test-pw log_host=10.0.2.2 log_port=5140 console=ttyS0,115200n8 --- quiet" \
+            -nic user,model=virtio-net-pci -display none -serial file:serial.log -no-reboot
+          rc=$?
+          set -e
+          echo "qemu exit: $rc"
+          echo "---- errors in installer log ----"
+          grep -iE 'error|fail|E: |unable|could not' installer-syslog.log | grep -v 'Failed to open /etc' | tail -80 || true
+          grep -q 'pkgsel' installer-syslog.log || echo "(no pkgsel lines - log_host may not have worked; see serial.log)"
+          if grep -q 'Installation step failed' installer-syslog.log || [ $rc -ne 0 ]; then
+            echo "::error::installer did not finish (exit $rc)"; exit 1
+          fi
+
+      - name: Boot installed system and check TACISS
+        run: |
+          qemu-system-x86_64 -enable-kvm -m 2048 -smp 2 -drive file=disk.qcow2,if=virtio \
+            -nic user,model=virtio-net-pci,hostfwd=tcp::18080-:8080 -display none -serial file:serial2.log &
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:18080/api/health -o health.json 2>/dev/null || \
+               curl -fsS http://127.0.0.1:18080/ -o index.html 2>/dev/null; then
+              echo "TACISS answered after ~$((i*5))s"; cat health.json 2>/dev/null; exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::TACISS did not answer on port 8080"; tail -50 serial2.log; exit 1
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: iso-vm-logs
+          path: |
+            installer-syslog.log
+            serial.log
+            serial2.log
+          if-no-files-found: ignore
