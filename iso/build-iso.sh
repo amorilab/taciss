@@ -60,7 +60,7 @@ else
   wget -q -O "$CACHE/SHA256SUMS.sign" "$DEBIAN_URL/SHA256SUMS.sign"
   gpgv --keyring /usr/share/keyrings/debian-role-keys.gpg "$CACHE/SHA256SUMS.sign" "$CACHE/SHA256SUMS" \
     || die "SHA256SUMS signature check failed"
-  NAME=$(awk '{print $2}' "$CACHE/SHA256SUMS" | grep -E "$PATTERN" | grep -v -e edu -e mac | head -n1)
+  NAME=$(awk '{print $2}' "$CACHE/SHA256SUMS" | grep -E -e "$PATTERN" | grep -v -e edu -e mac | head -n1)
   [[ -n "$NAME" ]] || die "no $FLAVOR image listed at $DEBIAN_URL"
   [[ "$NAME" == debian-13.* ]] || die "$NAME is not Debian 13. Set DEBIAN_URL to a 13.x archive, e.g. https://cdimage.debian.org/cdimage/archive/13.2.0/amd64/$SUBDIR"
   SRC="$CACHE/$NAME"
