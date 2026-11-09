@@ -102,6 +102,9 @@ if [[ "$FLAVOR" == netinst ]]; then
 
 ### netinst flavor: packages come from the internet
 d-i apt-setup/use_mirror boolean true
+# apt-setup reads this answer even when DHCP worked; "Do not configure" makes it
+# skip the mirror, leaving a netinst with nothing to install software from.
+d-i netcfg/dhcp_options select Retry network autoconfiguration
 d-i mirror/country string manual
 d-i mirror/http/hostname string deb.debian.org
 d-i mirror/http/directory string /debian
