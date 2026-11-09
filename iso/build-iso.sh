@@ -106,6 +106,9 @@ d-i mirror/country string manual
 d-i mirror/http/hostname string deb.debian.org
 d-i mirror/http/directory string /debian
 d-i mirror/http/proxy string
+d-i mirror/protocol string http
+d-i mirror/http/mirror select deb.debian.org
+d-i mirror/suite string trixie
 d-i apt-setup/services-select multiselect security, updates
 d-i apt-setup/security_host string security.debian.org
 EOF

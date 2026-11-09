@@ -25,7 +25,7 @@ jobs:
       - name: Tools + KVM
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq qemu-system-x86 qemu-utils xorriso >/dev/null
+          sudo apt-get install -y -qq qemu-system-x86 qemu-utils xorriso netpbm socat >/dev/null
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm.rules
           sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
           ls -l /dev/kvm
@@ -58,13 +58,30 @@ jobs:
           ' &
           set +e
           # Same options as the ISO's "TACISS server" boot entry, plus the account password
-          # (normally typed by a person) and remote logging.
-          timeout 45m qemu-system-x86_64 -enable-kvm -m 2048 -smp 2 \
+          # (normally typed by a person), remote logging, and debconf question logging.
+          qemu-system-x86_64 -enable-kvm -m 2048 -smp 2 \
             -cdrom taciss.iso -drive file=disk.qcow2,if=virtio \
             -kernel vmlinuz -initrd initrd.gz \
-            -append "auto=true priority=high preseed/file=/cdrom/taciss/iso/preseed.cfg passwd/user-password=ci-test-pw passwd/user-password-again=ci-test-pw log_host=10.0.2.2 log_port=5140 console=ttyS0,115200n8 --- quiet" \
-            -nic user,model=virtio-net-pci -display none -serial file:serial.log -no-reboot
-          rc=$?
+            -append "auto=true priority=high preseed/file=/cdrom/taciss/iso/preseed.cfg passwd/user-password=ci-test-pw passwd/user-password-again=ci-test-pw log_host=10.0.2.2 log_port=5140 DEBCONF_DEBUG=5 --- quiet" \
+            -nic user,model=virtio-net-pci -vga std -display none -monitor unix:mon.sock,server,nowait \
+            -serial file:serial.log -no-reboot &
+          QPID=$!
+          # Stop early if the installer log goes quiet for 5 minutes (stuck on a question).
+          last=0; still=0; rc=0
+          for i in $(seq 1 270); do
+            sleep 10
+            if ! kill -0 $QPID 2>/dev/null; then wait $QPID; rc=$?; break; fi
+            n=$(stat -c %s installer-syslog.log 2>/dev/null || echo 0)
+            if [ "$n" = "$last" ]; then still=$((still+10)); else still=0; last=$n; fi
+            if [ $still -ge 300 ]; then echo "installer stuck for 5 min"; rc=99; break; fi
+          done
+          if kill -0 $QPID 2>/dev/null; then
+            echo "screendump screen.ppm" | socat - UNIX-CONNECT:mon.sock >/dev/null; sleep 3
+            pnmtopng screen.ppm > screen.png 2>/dev/null || true
+            kill $QPID; [ $rc -eq 0 ] && rc=124
+          fi
+          echo "---- last questions asked ----"
+          grep -E 'INPUT|<-- GO' installer-syslog.log | tail -15 || true
           set -e
           echo "qemu exit: $rc"
           echo "---- errors in installer log ----"
@@ -96,4 +113,5 @@ jobs:
             installer-syslog.log
             serial.log
             serial2.log
+            screen.png
           if-no-files-found: ignore
