@@ -339,21 +339,25 @@ VIEWS.weather = async (root, params) => {
 
   // forecast + products + SPC
   const fcBody = h('div', { class: 'card-body' }, h('span', { class: 'muted' }, 'Loading forecast…'));
+  const stations = buildStationsCard();
+  const stationsCard = stations.card;
   const prodType = store('taciss-wx-product') || 'HWO';
   const prodBody = h('div', { class: 'card-body' }, h('span', { class: 'muted' }, 'Loading…'));
   root.append(
     h('div', { class: 'grid cols-dash' }, alertsCard, radarCard),
     h('div', { style: 'margin-top:16px' }, mapCard),
     h('div', { class: 'grid cols-2', style: 'margin-top:16px' },
-      h('div', { class: 'card' }, h('h3', {}, '🌤 Forecast'), fcBody),
+      h('div', { class: 'card' }, h('h3', {}, 'Forecast', h('span', { class: 'muted small right' }, WFO[office] ? 'NWS ' + WFO[office].name + ' area' : 'NWS ' + office)), fcBody),
       h('div', { class: 'card' }, h('h3', {}, '📄 ', office, ' ',
         h('span', { class: 'right seg' }, ['HWO', 'AFD'].map((t) => h('button', { class: 'small' + (t === prodType ? ' primary' : ''), onclick: () => { store('taciss-wx-product', t); render(); } }, t)))), prodBody)),
+    stationsCard,
     h('div', { class: 'card', style: 'margin-top:16px' }, h('h3', {}, '🌪 SPC Day 1 Convective Outlook',
       h('a', { class: 'right', href: 'https://www.spc.noaa.gov/products/outlook/day1otlk.html', target: '_blank', rel: 'noopener' }, 'spc.noaa.gov ↗')),
     h('div', { class: 'radar-wrap' }, h('img', { class: 'radar-img', alt: 'SPC Day 1 outlook', src: `https://www.spc.noaa.gov/products/outlook/day1otlk.png?t=${Math.floor(Date.now() / 600000)}` }))));
 
   // async fills (don't block the page)
-  api('GET', 'weather/forecast').then((f) => {
+  // forecast for the selected NWS office's area (its office location), else the map center
+  api('GET', 'weather/forecast' + (WFO[office] ? `?lat=${WFO[office].lat}&lon=${WFO[office].lon}` : '')).then((f) => {
     fcBody.replaceChildren(h('div', { class: 'muted', style: 'font-size:13px;margin-bottom:8px' }, `${f.place} · NWS ${f.office}` + (f.updated ? ` · updated ${ago(f.updated)}` : '')),
       h('div', { class: 'fc-grid' }, f.periods.slice(0, 8).map((p) => h('div', { class: 'fc' + (p.isDaytime ? '' : ' night'), title: p.detailedForecast },
         h('div', { class: 'fc-name' }, p.name), h('div', { class: 'fc-temp' }, `${p.temperature}°${p.temperatureUnit}`),
@@ -376,7 +380,8 @@ VIEWS.weather = async (root, params) => {
       .bindPopup(h('div', {}, h('b', {}, a.event), h('br'), 'until ', until(a), h('br'), (a.area || '').slice(0, 160)))
       .addTo(polys);
   }
-  L.control.layers(null, { 'Radar mosaic': mosaic, 'Warning polygons': polys }, { collapsed: true }).addTo(m);
+  L.control.layers(null, { 'Radar mosaic': mosaic, 'Warning polygons': polys, 'Weather stations': stations.layer }, { collapsed: true }).addTo(m);
+  stations.attach(m);
 
   // deep link from the ticker: #/weather/<alert id>
   if (params[0] && S.wxOpened !== params[0]) {
@@ -386,9 +391,120 @@ VIEWS.weather = async (root, params) => {
   } else if (!params[0]) S.wxOpened = null;
 };
 
+/* ---------- weather stations near the user ---------- */
+function wxObsLine(o) {
+  return [o.temp_f != null && `${o.temp_f}°F`, o.text, o.feels_f != null && o.feels_f !== o.temp_f && `feels ${o.feels_f}°F`,
+    o.humidity != null && `${o.humidity}% RH`,
+    o.wind_mph != null && `wind ${o.wind_dir != null ? Math.round(o.wind_dir) + '° ' : ''}${o.wind_mph} mph` + (o.gust_mph ? ` G${o.gust_mph}` : ''),
+    o.pressure_inhg != null && `${o.pressure_inhg} inHg`, o.visibility_mi != null && `vis ${o.visibility_mi} mi`].filter(Boolean).join(' · ');
+}
+const distMi = (a, b) => {
+  const r = Math.PI / 180, dLat = (b[0] - a[0]) * r, dLon = (b[1] - a[1]) * r;
+  const x = Math.sin(dLat / 2) ** 2 + Math.cos(a[0] * r) * Math.cos(b[0] * r) * Math.sin(dLon / 2) ** 2;
+  return 3959 * 2 * Math.asin(Math.sqrt(x));
+};
+
+function buildStationsCard() {
+  const layer = L.layerGroup();
+  let map = null; let all = [];
+  const mine = () => (S.me && S.me.prefs && S.me.prefs.wx_station) || '';
+  const q = h('input', { type: 'search', placeholder: 'Search by name, ID or callsign (e.g. KBNA, Smyrna)…', oninput: () => paint() });
+  const src = h('select', { onchange: () => paint() }, h('option', { value: '' }, 'NWS and APRS stations'),
+    h('option', { value: 'nws' }, 'NWS stations (airports, mesonets)'), h('option', { value: 'aprs' }, 'APRS / CWOP home stations'));
+  const list = h('ul', { class: 'items wx-stations' });
+  const detail = h('div');
+  const note = h('div', { class: 'muted small' }, 'Loading stations…');
+  const card = h('div', { class: 'card', style: 'margin-top:16px' }, h('h3', {}, 'Weather stations',
+    h('span', { class: 'muted small right' }, 'click one for current conditions')),
+  h('div', { class: 'card-body' }, h('div', { class: 'aprs-tools' }, q, src), detail, note), list);
+
+  const center = () => {
+    const me = all.find((s) => s.id === mine());
+    return me ? [me.lat, me.lon] : [+S.settings.map_lat || 35.86, +S.settings.map_lon || -86.35];
+  };
+  async function show(st) {
+    detail.replaceChildren(h('div', { class: 'muted' }, 'Loading ' + st.id + '…'));
+    if (map) map.setView([st.lat, st.lon], Math.max(map.getZoom(), 9));
+    if (st.source === 'aprs') {
+      const w = st.wx || {};
+      detail.replaceChildren(h('div', { class: 'wx-station' }, h('b', {}, st.id), ' ', h('span', { class: 'muted' }, 'APRS weather station · ', st.last ? ago(st.last) : ''),
+        h('div', { class: 'wx-big' }, w.temp_f != null ? `${w.temp_f}°F` : '—'),
+        h('div', { class: 'muted' }, wxObsLine({ humidity: w.humidity, wind_dir: w.wind_dir, wind_mph: w.wind_mph, gust_mph: w.gust_mph,
+          pressure_inhg: w.pressure_mb != null ? Math.round(w.pressure_mb / 33.8639 * 100) / 100 : null })),
+        st.name ? h('div', { class: 'muted small' }, st.name) : null));
+      return;
+    }
+    try {
+      const o = await api('GET', 'weather/station?id=' + encodeURIComponent(st.id));
+      const isMine = mine() === st.id;
+      detail.replaceChildren(h('div', { class: 'wx-station' }, h('b', {}, `${o.id} · ${o.name}`), ' ',
+        h('span', { class: 'muted' }, o.time ? 'observed ' + ago(o.time) : 'no recent observation'),
+        h('div', { class: 'wx-big' }, o.temp_f != null ? `${o.temp_f}°F` : '—', ' ', h('span', {}, o.text || '')),
+        h('div', { class: 'muted' }, wxObsLine({ ...o, temp_f: null, text: '' })),
+        S.me ? h('button', { class: 'small' + (isMine ? '' : ' primary'), disabled: isMine, onclick: async () => {
+          try {
+            S.me.prefs = await api('PUT', 'me/prefs', { wx_station: st.id });
+            loadWxNow(true); toast(`${st.id} is now your station`); show(st); paint();
+          } catch (e) { toast(e.message, true); }
+        } }, isMine ? 'Your station' : 'Use as my station (top bar weather)') : null));
+    } catch (e) { detail.replaceChildren(h('div', { class: 'err' }, e.message)); }
+  }
+  function paint() {
+    const t = q.value.trim().toLowerCase(); const c = center();
+    const rows = all.filter((s) => (!src.value || s.source === src.value) && (!t || s.id.toLowerCase().includes(t) || (s.name || '').toLowerCase().includes(t)))
+      .map((s) => ({ ...s, d: distMi(c, [s.lat, s.lon]) })).sort((a, b) => a.d - b.d).slice(0, 60);
+    note.textContent = `${all.length} stations in your area · nearest first` + (mine() ? ` (from your station ${mine()})` : ' (from the map center)');
+    list.replaceChildren(...(rows.length ? rows.map((s) => h('li', { onclick: () => show(s) },
+      h('div', { class: 't' }, s.id, ' ', s.id === mine() ? h('span', { class: 'badge c-ok' }, 'mine') : null, ' ', h('span', { class: 'muted small' }, s.name)),
+      h('div', { class: 's' }, [s.source === 'aprs' ? 'APRS' : 'NWS', `${Math.round(s.d)} mi`,
+        s.source === 'aprs' && s.wx && s.wx.temp_f != null ? `${s.wx.temp_f}°F` : ''].filter(Boolean).join(' · '))))
+      : [h('li', { class: 'empty' }, 'No stations match.')]));
+    layer.clearLayers();
+    for (const s of rows) {
+      L.circleMarker([s.lat, s.lon], { radius: 5, color: s.source === 'aprs' ? '#a855f7' : '#0ea5e9', weight: 2, fillOpacity: 0.6 })
+        .bindTooltip(s.id + (s.name ? ' · ' + s.name : '')).on('click', () => show(s)).addTo(layer);
+    }
+  }
+  api('GET', 'weather/stations').then((rows) => {
+    all = rows; paint();
+    const me = all.find((s) => s.id === mine());
+    if (me) show(me);
+  }).catch((e) => { note.textContent = e.message; });
+  return { card, layer, attach(m) { map = m; } };
+}
+
+/* ---------- current weather in the top bar ---------- */
+function wxGlyph(text, night) {
+  const t = (text || '').toLowerCase();
+  if (/thunder|t-storm/.test(t)) return '⛈';
+  if (/snow|sleet|ice|freezing/.test(t)) return '❄';
+  if (/rain|drizzle|shower/.test(t)) return '🌧';
+  if (/fog|mist|haze|smoke/.test(t)) return '🌫';
+  if (/partly|mostly sunny|mostly clear|few|scattered/.test(t)) return night ? '☁' : '⛅';
+  if (/cloud|overcast/.test(t)) return '☁';
+  if (/wind|breez/.test(t)) return '💨';
+  if (/clear|sunny|fair/.test(t)) return night ? '🌙' : '☀';
+  return '';
+}
+async function loadWxNow(force) {
+  const el = document.getElementById('wx-now');
+  if (!el) return;
+  if (!S.me) { el.hidden = true; return; }
+  if (!force && S.wxNowAt && Date.now() - S.wxNowAt < 600000) return;  // at most every 10 minutes
+  S.wxNowAt = Date.now();
+  try {
+    const o = await api('GET', 'weather/now');
+    el.replaceChildren(h('span', { class: 'wx-now-glyph' }, wxGlyph(o.text, o.night)),
+      o.temp_f != null ? `${o.temp_f}°F` : '', ' ', h('span', { class: 'wx-now-text' }, o.text || ''));
+    el.title = `${o.id} · ${o.name}` + (o.time ? ` · observed ${ago(o.time)}` : '') + (o.chosen ? '' : '\nPick your own station on the Weather tab');
+    el.hidden = false;
+  } catch { el.hidden = true; }
+}
+
 /* ---------- boot hooks ---------- */
 (function initWeather() {
   // keep relative times / expiries fresh and recover if a live event was missed
   setInterval(renderTicker, 60000);
   setInterval(() => refreshWx(true), 120000);
+  setInterval(() => loadWxNow(), 60000);
 })();

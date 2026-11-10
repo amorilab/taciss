@@ -128,7 +128,7 @@ VIEWS.reports = async (root) => {
     S.schema.entities.reports.fields.find((f) => f.name === 'kind').choices.map((c) => h('option', { value: c }, nice(c))));
   const q = h('input', { type: 'search', placeholder: 'Search reports…', 'data-keep': 'rep-q', oninput: () => draw() });
   const tab = store('taciss-feed-tab') || 'all';
-  root.append(h('div', { class: 'toolbar' }, h('h2', {}, '🛰 SITREP War Room'), q, kind,
+  root.append(h('div', { class: 'toolbar' }, h('h2', {}, 'SITREP War Room'), q, kind,
     S.me && canDo('reports', 'create') ? h('button', { class: 'primary', onclick: () => editRecord('reports', null, { kind: 'storm_report' }) }, '+ New Report') : null,
     h('button', { title: 'Full-screen war-room display', onclick: () => {
       document.body.classList.toggle('warroom-mode');

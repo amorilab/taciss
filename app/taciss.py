@@ -130,7 +130,8 @@ INCIDENT_KINDS = ["severe_weather", "tornado", "flood", "winter_storm", "wildfir
 ENTITIES = {
     "incidents": {
         "label": "Incidents", "singular": "Incident", "public": True,
-        "create": "operator", "edit": "operator", "delete": "operator",
+        "create": "operator", "edit": "owner", "delete": "owner",  # owner = submitter, program admin or server admin (Handler.can_modify)
+        "program_admin_create": True,  # program admins may add these even below the create role
         "fields": [
             F("title", "Title", required=True, list=True),
             F("kind", "Type", choices=INCIDENT_KINDS, list=True, default="severe_weather"),
@@ -149,6 +150,7 @@ ENTITIES = {
     "activity": {
         "label": "Activity Log", "singular": "Log Entry", "public": False, "append_only": True,
         "create": "operator", "edit": "admin", "delete": "admin",
+        "program_admin_create": True,  # program admins may add these even below the create role
         "fields": [
             F("incident_id", "Incident", "ref", required=True, ref="incidents", list=True),
             F("body", "Entry", "textarea", required=True, list=True),
@@ -156,7 +158,8 @@ ENTITIES = {
     },
     "checkins": {
         "label": "Net Check-ins", "singular": "Check-in", "public": False,
-        "create": "operator", "edit": "operator", "delete": "operator",
+        "create": "operator", "edit": "owner", "delete": "owner",
+        "program_admin_create": True,  # program admins may add these even below the create role
         "fields": [
             F("incident_id", "Incident", "ref", required=True, ref="incidents", list=True),
             F("callsign", "Callsign", required=True, list=True),
@@ -171,7 +174,7 @@ ENTITIES = {
     },
     "reports": {
         "label": "Reports", "singular": "Report", "public": True,
-        "create": "viewer", "edit": "operator", "delete": "operator",
+        "create": "viewer", "edit": "owner", "delete": "owner",
         "fields": [
             F("title", "Title", required=True, list=True),
             F("kind", "Type", choices=["sitrep", "storm_report", "damage", "net_report", "shelter", "other"],
@@ -189,7 +192,7 @@ ENTITIES = {
     },
     "programs": {
         "label": "Programs", "singular": "Program", "public": True,
-        "create": "operator", "edit": "operator", "delete": "operator",
+        "create": "admin", "edit": "owner", "delete": "owner",  # owner = see Handler.can_modify
         "fields": [
             F("name", "Name", required=True, list=True),
             F("kind", "Type", choices=["ARES", "RACES", "Skywarn", "CERT", "AUXCOMM", "Other"], list=True, default="ARES"),
@@ -204,11 +207,12 @@ ENTITIES = {
             F("agencies", "Served Agencies", "refs", ref="agencies"),
             F("lat", "Latitude", "real"), F("lon", "Longitude", "real"),
             F("notes", "Notes", "textarea"),
+            F("logo", "Logo", hidden=True),  # "png:<hash>" when a logo is uploaded (file in data/program-logos)
         ],
     },
     "agencies": {
         "label": "Agencies", "singular": "Agency", "public": True,
-        "create": "operator", "edit": "operator", "delete": "operator",
+        "create": "admin", "edit": "owner", "delete": "owner",  # owner = see Handler.can_modify
         "fields": [
             F("name", "Name", required=True, list=True),
             F("kind", "Type", choices=["Emergency Management", "Public Safety", "Fire/EMS", "Law Enforcement",
@@ -224,7 +228,8 @@ ENTITIES = {
     },
     "resources": {
         "label": "Resources", "singular": "Resource", "public": False,
-        "create": "operator", "edit": "operator", "delete": "operator",
+        "create": "operator", "edit": "owner", "delete": "owner",
+        "program_admin_create": True,  # program admins may add these even below the create role
         "fields": [
             F("name", "Name", required=True, list=True),
             F("kind", "Type", choices=["personnel", "team", "vehicle", "go_kit", "repeater", "shelter",
@@ -238,7 +243,8 @@ ENTITIES = {
     },
     "cameras": {
         "label": "Cameras", "singular": "Camera", "public": False,
-        "create": "operator", "edit": "operator", "delete": "operator",
+        "create": "operator", "edit": "owner", "delete": "owner",
+        "program_admin_create": True,  # program admins may add these even below the create role
         "fields": [
             F("name", "Name", required=True, list=True),
             F("kind", "Type", choices=["weather", "traffic", "river", "facility", "other"], list=True, default="weather"),
@@ -303,6 +309,18 @@ SETTINGS_DEFAULTS = {
     "aprs_filter_extra": "",        # advanced: extra APRS-IS filter terms, e.g. "p/W4 t/w"
     "aprsfi_api_key": "",           # free key from aprs.fi (Account -> API key) for callsign lookups
     "aprs_tx_enabled": "1",         # let users send positions/objects/messages under their own callsign
+    # MeshCore: LoRa mesh traffic from internet-connected observers (needs internet on the server)
+    "meshcore_enabled": "1",
+    "meshcore_bbox": "34.9,-90.4,36.7,-81.6",  # S,W,N,E area to show (default: Tennessee)
+    "meshcore_days": "14",          # hide map nodes not heard from in this many days
+    "meshcore_map_url": "https://map.meshcore.dev/api/v1/nodes",  # public MeshCore node map
+    "meshcore_analyzer_url": "",    # CoreScope analyzer for live packets/channels, e.g. https://analyzer.example.org
+    "meshcore_regions": "",         # observer area codes (IATA) to show from the analyzer, e.g. BNA,TYS,CHA,MEM
+    "meshcore_channels": "",        # only these public channels, e.g. #weather,#wx,#bna-wx,Public (blank = all)
+    "meshcore_embed_url": "https://analyzer.letsmesh.net/",  # web analyzer shown inside the tab (blank = none)
+    "meshcore_links": "MeshCore map|https://map.meshcore.dev/\n"
+                      "LetsMesh analyzer|https://analyzer.letsmesh.net/\n"
+                      "CoreScope (run your own analyzer)|https://github.com/Kpa-clawbot/CoreScope",
 }
 SECRET_SETTINGS = {"windy_api_key", "tdot_api_key", "aprsfi_api_key"}  # never sent back to browsers
 SECRET_MASK = "••••••••"
@@ -354,10 +372,13 @@ def access_for(con, user):
     acc = {"user": user, "admin": bool(user and user["role"] == "admin")}
     for k in MEMBER_KINDS:
         acc[k] = set()
+    acc["program_admin"] = set()  # programs this user is a program admin of
     if user:
-        for r in con.execute("SELECT kind, ref_id FROM memberships WHERE user_id = ?", (user["id"],)):
+        for r in con.execute("SELECT kind, ref_id, role FROM memberships WHERE user_id = ?", (user["id"],)):
             if r["kind"] in acc:
                 acc[r["kind"]].add(r["ref_id"])
+                if r["kind"] == "programs" and r["role"] == "admin":
+                    acc["program_admin"].add(r["ref_id"])
     return acc
 
 
@@ -435,6 +456,9 @@ def init_db():
             user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
             kind TEXT NOT NULL, ref_id INTEGER NOT NULL, PRIMARY KEY (user_id, kind, ref_id))""")
         con.execute("CREATE INDEX IF NOT EXISTS idx_memberships_ref ON memberships(kind, ref_id)")
+        # role within a program: 'member', or 'admin' (program admin: manages that program and its records)
+        if "role" not in {r["name"] for r in con.execute("PRAGMA table_info(memberships)")}:
+            con.execute("ALTER TABLE memberships ADD COLUMN role TEXT NOT NULL DEFAULT 'member'")
         con.execute("UPDATE incidents SET visibility = 'open' WHERE visibility IS NULL")
         for k, v in SETTINGS_DEFAULTS.items():
             con.execute("INSERT OR IGNORE INTO settings(key, value) VALUES (?, ?)", (k, v))
@@ -759,6 +783,59 @@ class WeatherService:
                         | {"pop": (p.get("probabilityOfPrecipitation") or {}).get("value")}
                         for p in fc.get("properties", {}).get("periods", [])[:14]],
         }
+
+    # -- weather stations and current conditions --
+    def stations(self):
+        """NWS observation stations in the configured states (ASOS/AWOS and other networks NWS ingests)."""
+        out = []
+        for st in re.sub(r"[^A-Z,]", "", (self.settings().get("wx_states") or "TN").upper()).split(","):
+            if not st:
+                continue
+            data = self.fetch("/stations", {"state": st, "limit": 500}, ttl=7 * DAY, disk=f"wx-stations-{st}.json")
+            pages = [data]
+            for n in range(1, 8):  # NWS pages its station list 500 at a time
+                nxt = (data.get("pagination") or {}).get("next") or ""
+                if not nxt.startswith(self.API + "/") or len(data.get("features") or []) < 500:
+                    break
+                data = self.fetch(nxt[len(self.API):], ttl=7 * DAY, disk=f"wx-stations-{st}-{n}.json")
+                pages.append(data)
+            seen = set()
+            for page in pages:
+                for f in page.get("features", []):
+                    p, c = f.get("properties", {}), (f.get("geometry") or {}).get("coordinates") or [None, None]
+                    sid = p.get("stationIdentifier")
+                    if sid and sid not in seen and c[1] is not None:
+                        seen.add(sid)
+                        out.append({"id": sid, "name": p.get("name") or "", "lat": c[1], "lon": c[0], "source": "nws"})
+        return out
+
+    def nearest_station(self, lat, lon):
+        props = self.fetch(f"/points/{lat:.4f},{lon:.4f}", ttl=30 * DAY).get("properties", {})
+        url = props.get("observationStations") or ""
+        if not url.startswith(self.API + "/"):
+            raise ApiError(502, "NWS returned no stations for that location.")
+        feats = self.fetch(url[len(self.API):], ttl=30 * DAY).get("features") or []
+        if not feats:
+            raise ApiError(404, "No weather stations near that location.")
+        return feats[0]["properties"]["stationIdentifier"]
+
+    def observation(self, sid):
+        """Latest observation at an NWS station, in US units."""
+        data = self.fetch(f"/stations/{sid}/observations/latest", ttl=300)
+        p = data.get("properties", {})
+        val = lambda k: (p.get(k) or {}).get("value")
+        c_to_f = lambda c: None if c is None else round(c * 9 / 5 + 32)
+        kmh_to_mph = lambda v: None if v is None else round(v / 1.609)
+        name = self.fetch(f"/stations/{sid}", ttl=30 * DAY).get("properties", {}).get("name") or sid
+        return {"id": sid, "name": name, "time": p.get("timestamp"), "text": p.get("textDescription") or "",
+                "night": "/night/" in (p.get("icon") or ""), "temp_f": c_to_f(val("temperature")),
+                "dewpoint_f": c_to_f(val("dewpoint")), "feels_f": c_to_f(val("heatIndex") if val("heatIndex") is not None
+                                                                         else val("windChill")),
+                "humidity": None if val("relativeHumidity") is None else round(val("relativeHumidity")),
+                "wind_dir": val("windDirection"), "wind_mph": kmh_to_mph(val("windSpeed")),
+                "gust_mph": kmh_to_mph(val("windGust")),
+                "pressure_inhg": None if val("barometricPressure") is None else round(val("barometricPressure") / 3386.39, 2),
+                "visibility_mi": None if val("visibility") is None else round(val("visibility") / 1609.34, 1)}
 
     def product(self, ptype, office):
         # look up by issuing office (KOHX, KMRX...): some offices don't file products under their own location code
@@ -1723,6 +1800,236 @@ class AprsService:
 
 
 APRS = AprsService()
+
+
+# --------------------------------------------------------------------------
+# MeshCore: LoRa mesh traffic as seen by internet-connected observers.
+#  * Node directory for our area from the public MeshCore map (map.meshcore.dev).
+#  * Live packets, observers, nodes and public-channel messages from a CoreScope
+#    analyzer (open source; run by a regional group or yourself) if one is configured.
+#  * Links (and an optional embedded view) for other web tools such as LetsMesh.
+# Everything is fetched on demand when someone opens the tab and cached (also on
+# disk, so the last data stays viewable offline).
+# --------------------------------------------------------------------------
+MC_NODE_TYPES = {1: "companion", 2: "repeater", 3: "room", 4: "sensor"}
+MC_PAYLOADS = {0: "REQ", 1: "RESPONSE", 2: "TXT_MSG", 3: "ACK", 4: "ADVERT", 5: "GRP_TXT", 6: "GRP_DATA",
+               7: "ANON_REQ", 8: "PATH", 9: "TRACE", 10: "MULTIPART", 11: "CONTROL", 15: "RAW_CUSTOM"}
+
+
+def _bbox(s, key):
+    try:
+        so, w, n, e = (float(x) for x in (s.get(key) or "").split(","))
+        return so, w, n, e
+    except ValueError:
+        return 34.9, -90.4, 36.7, -81.6
+
+
+def _in_box(lat, lon, box):
+    try:
+        return box[0] <= float(lat) <= box[2] and box[1] <= float(lon) <= box[3]
+    except (TypeError, ValueError):
+        return False
+
+
+class MeshcoreService:
+    UA = f"TACISS/{VERSION} (+https://github.com/amorilab/taciss)"
+    MAX_MAP_BYTES = 400 * 1024 * 1024  # decompressed safety cap
+
+    def __init__(self):
+        self.map_lock = threading.Lock()  # one download of the big node list at a time
+
+    def map_nodes(self, s):
+        """Nodes in our box from the public MeshCore map. The list is worldwide (~55 MB of JSON), so it's
+        streamed and filtered object by object instead of loaded whole (fine on a Raspberry Pi)."""
+        url = s.get("meshcore_map_url") or SETTINGS_DEFAULTS["meshcore_map_url"]
+        box = _bbox(s, "meshcore_bbox")
+        key = "meshcore-map-" + hashlib.sha1(f"{url}|{box}".encode()).hexdigest()[:10]
+
+        def fetch():
+            req = urllib.request.Request(url, headers={"User-Agent": self.UA, "Accept-Encoding": "gzip"})
+            out, seen = [], 0
+            with urllib.request.urlopen(req, timeout=120) as r:
+                gz = zlib.decompressobj(16 + zlib.MAX_WBITS) if r.headers.get("Content-Encoding") == "gzip" else None
+                text = codecs_decoder()
+                dec = json.JSONDecoder()
+                buf, started = "", False
+                while True:
+                    chunk = r.read(256 * 1024)
+                    if chunk:
+                        data = gz.decompress(chunk) if gz else chunk
+                        seen += len(data)
+                        if seen > self.MAX_MAP_BYTES:
+                            raise ValueError("node list too large")
+                        buf += text.decode(data)
+                    i = 0
+                    while True:
+                        while i < len(buf) and buf[i] in " \t\r\n,":
+                            i += 1
+                        if not started:
+                            if i < len(buf) and buf[i] == "[":
+                                started, i = True, i + 1
+                                continue
+                            if i < len(buf):
+                                raise ValueError("unexpected node list format")
+                            break
+                        if i >= len(buf) or buf[i] == "]":
+                            break
+                        try:
+                            obj, j = dec.raw_decode(buf, i)
+                        except ValueError:
+                            break  # object continues in the next chunk
+                        i = j
+                        n = self.compact_map_node(obj, box)
+                        if n:
+                            out.append(n)
+                    buf = buf[i:]
+                    if not chunk:
+                        break
+            return out
+
+        with self.map_lock:
+            return FEEDS.cached(key, 3600, fetch)
+
+    @staticmethod
+    def compact_map_node(o, box):
+        if not isinstance(o, dict) or not _in_box(o.get("adv_lat"), o.get("adv_lon"), box):
+            return None
+        last = str(o.get("last_advert") or "")[:19] + "Z" if o.get("last_advert") else None
+        if last and last > (datetime.now(timezone.utc) + timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ"):
+            last = str(o.get("updated_date") or "")[:19] + "Z" or None  # node clock is wrong; use when the map saw it
+        p = o.get("params") or {}
+        radio = f"{p.get('freq')} MHz SF{p.get('sf')} BW{p.get('bw')} CR{p.get('cr')}" if p.get("freq") else ""
+        return {"key": str(o.get("public_key") or "")[:64], "name": str(o.get("adv_name") or "")[:60],
+                "type": MC_NODE_TYPES.get(o.get("type"), "other"), "lat": round(float(o["adv_lat"]), 5),
+                "lon": round(float(o["adv_lon"]), 5), "last": last, "radio": radio, "source": "map"}
+
+    # ---- CoreScope analyzer
+    def analyzer(self, s, path, ttl):
+        base = (s.get("meshcore_analyzer_url") or "").rstrip("/")
+        if not base:
+            raise ApiError(400, "No MeshCore analyzer is set up. An admin can add one in Admin -> Settings.")
+        key = "meshcore-an-" + hashlib.sha1(f"{base}{path}".encode()).hexdigest()[:12]
+
+        def fetch():
+            req = urllib.request.Request(base + path, headers={"User-Agent": self.UA, "Accept": "application/json"})
+            with urllib.request.urlopen(req, timeout=25) as r:
+                return json.loads(r.read(20 * 1024 * 1024).decode("utf-8", "replace"))
+        return FEEDS.cached(key, ttl, fetch)
+
+    @staticmethod
+    def channel_key(name):
+        return str(name or "").strip().lstrip("#").lower()
+
+    def channel_ok(self, s, name):
+        """True if this public channel is on the admin's list (or there is no list)."""
+        allow = {self.channel_key(c) for c in (s.get("meshcore_channels") or "").split(",") if c.strip()}
+        return not allow or self.channel_key(name) in allow
+
+    @staticmethod
+    def regions(s):
+        return ",".join(c for c in re.split(r"[\s,]+", (s.get("meshcore_regions") or "").upper()) if c)
+
+    def packets(self, s):
+        q = "/api/packets?limit=150&order=desc" + (f"&region={quote(self.regions(s))}" if self.regions(s) else "")
+        res = self.analyzer(s, q, 15)
+        rows = []
+        for p in ((res.get("data") or {}).get("packets") or [])[:150]:
+            try:
+                d = json.loads(p.get("decoded_json") or "{}")
+            except ValueError:
+                d = {}
+            kind = d.get("type") or MC_PAYLOADS.get(p.get("payload_type"), str(p.get("payload_type")))
+            summary = ""
+            if kind == "ADVERT":
+                f = d.get("flags") or {}
+                role = next((k for k in ("repeater", "room", "sensor", "chat") if f.get(k)), "")
+                summary = f"{d.get('name') or '?'}" + (f" ({'companion' if role == 'chat' else role})" if role else "")
+            elif kind in ("GRP_TXT", "GRP_DATA"):
+                if (s.get("meshcore_channels") or "").strip() and not (d.get("channel") and self.channel_ok(s, d["channel"])):
+                    continue  # channel list set: skip other channels (and encrypted ones we can't name)
+                summary =(f"#{d['channel']}" if d.get("channel") and not str(d["channel"]).startswith("#") else
+                           d.get("channel") or f"channel {d.get('channelHashHex', '?')}")
+                if d.get("decryptionStatus") != "decrypted":
+                    summary += " (encrypted)"
+            elif kind == "CONTROL":
+                summary = str(d.get("ctrlSubtype") or "")
+            path = p.get("_parsedPath") or []
+            rows.append({"t": p.get("timestamp") or p.get("first_seen"), "type": kind, "summary": summary[:120],
+                         "observer": p.get("observer_name"), "iata": p.get("observer_iata"),
+                         "hops": len(path) if isinstance(path, list) else None, "snr": p.get("snr"),
+                         "rssi": p.get("rssi"), "seen": p.get("observation_count"), "hash": p.get("hash"),
+                         "lat": d.get("lat") if kind == "ADVERT" else None, "lon": d.get("lon") if kind == "ADVERT" else None})
+        return {"updated": res["updated"], "error": res["error"], "data": rows}
+
+    def observers(self, s):
+        res = self.analyzer(s, "/api/observers", 120)
+        regs, box = set(self.regions(s).split(",")) - {""}, _bbox(s, "meshcore_bbox")
+        keep = []
+        for o in ((res.get("data") or {}).get("observers") or []):
+            if (regs and o.get("iata") in regs) or (not regs and _in_box(o.get("lat"), o.get("lon"), box)) or \
+                    (regs and _in_box(o.get("lat"), o.get("lon"), box)):
+                keep.append({k: o.get(k) for k in ("id", "name", "iata", "last_seen", "packetsLastHour", "model",
+                                                   "lat", "lon", "battery_mv", "noise_floor", "nodeRole")})
+        return {"updated": res["updated"], "error": res["error"], "data": keep}
+
+    def nodes(self, s):
+        res = self.analyzer(s, "/api/nodes?limit=5000", 300)
+        box = _bbox(s, "meshcore_bbox")
+        keep = [{"key": n.get("public_key"), "name": n.get("name"), "type": n.get("role") or n.get("type") or "node",
+                 "lat": n.get("lat"), "lon": n.get("lon"), "last": n.get("last_heard") or n.get("last_seen"),
+                 "source": "analyzer"}
+                for n in ((res.get("data") or {}).get("nodes") or []) if _in_box(n.get("lat"), n.get("lon"), box)]
+        return {"updated": res["updated"], "error": res["error"], "data": keep}
+
+    def channels(self, s):
+        res = self.analyzer(s, "/api/channels", 60)
+        rows = [{k: c.get(k) for k in ("hash", "name", "lastActivity", "lastSender", "lastMessage", "messageCount")}
+                for c in ((res.get("data") or {}).get("channels") or []) if self.channel_ok(s, c.get("name") or c.get("hash"))]
+        rows.sort(key=lambda c: c.get("lastActivity") or "", reverse=True)
+        return {"updated": res["updated"], "error": res["error"], "data": rows[:60]}
+
+    def messages(self, s, channel):
+        if not self.channel_ok(s, channel):
+            raise ApiError(403, "That channel isn't one of the channels this server shows.")
+        q = f"/api/channels/{quote(channel, safe='')}/messages?limit=60" + \
+            (f"&region={quote(self.regions(s))}" if self.regions(s) else "")
+        res = self.analyzer(s, q, 30)
+        rows = [{k: m.get(k) for k in ("timestamp", "sender", "text", "hops", "snr", "observers", "repeats")}
+                for m in ((res.get("data") or {}).get("messages") or [])]
+        rows.sort(key=lambda m: m.get("timestamp") or "", reverse=True)  # newest first
+        return {"updated": res["updated"], "error": res["error"], "data": rows}
+
+
+_EMBED = {"t": 0.0, "origin": ""}
+
+
+def embed_origin():
+    """https origin of the configured MeshCore embed page (re-read at most every 30 s)."""
+    if time.time() - _EMBED["t"] > 30:
+        origin = ""
+        try:
+            con = connect()
+            try:
+                r = con.execute("SELECT key, value FROM settings WHERE key IN ('meshcore_embed_url', 'meshcore_enabled')")
+                s = dict(SETTINGS_DEFAULTS, **{k: v for k, v in r})
+            finally:
+                con.close()
+            u = urlparse(s.get("meshcore_embed_url") or "")
+            if s.get("meshcore_enabled") == "1" and u.scheme == "https" and u.hostname and \
+                    re.fullmatch(r"[A-Za-z0-9.-]+(:\d+)?", u.netloc):
+                origin = f"https://{u.netloc}"
+        except sqlite3.Error:
+            pass
+        _EMBED.update(t=time.time(), origin=origin)
+    return _EMBED["origin"]
+
+
+def codecs_decoder():
+    import codecs
+    return codecs.getincrementaldecoder("utf-8")("replace")
+
+
+MESHCORE = MeshcoreService()
 
 
 def clean_record(entity, data, partial):
@@ -2962,6 +3269,23 @@ class PdfDoc:
         return bytes(out)
 
 
+LOGO_MIME = {"png": "image/png", "jpg": "image/jpeg", "gif": "image/gif", "webp": "image/webp"}
+MAX_LOGO = 1_500_000
+
+
+def logo_type(data):
+    """Image type from the file's first bytes (never trust the name or the browser's label)."""
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "jpg"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return "gif"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "webp"
+    return None
+
+
 def _ts(v):
     """Stored UTC timestamp -> '2026-11-09 14:03Z'."""
     if not v:
@@ -3246,9 +3570,11 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Referrer-Policy", "same-origin")
+        embed = embed_origin()  # the one outside page the MeshCore tab may show inside a frame
         self.send_header("Content-Security-Policy",
                          "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
                          "img-src 'self' data: blob: https: http:; connect-src 'self'; "
+                         + (f"frame-src 'self' {embed}; " if embed else "") +
                          "frame-ancestors 'none'; base-uri 'self'; form-action 'self'")
         if self.is_https():
             self.send_header("Strict-Transport-Security", "max-age=31536000")
@@ -3403,6 +3729,84 @@ class Handler(BaseHTTPRequestHandler):
     def scope_of(self, entity, row):
         return scope_of(self.con, entity, row)
 
+    # ---- who may change a record ------------------------------------------
+    # Server admins: anything. Otherwise only:
+    #   * the person who submitted it (records created on this node, not synced from another), or
+    #   * a program admin of a program the record belongs to (the program itself, incidents assigned
+    #     to it, and the log/reports/check-ins/resources/chat of those incidents), or
+    #   * for net check-ins, the person who opened the incident (net control runs the net).
+    # Log entries and chat are append-only: server admins only.
+    def incident_row(self, iid):
+        cache = self.__dict__.setdefault("_inc_rows", {})
+        if iid not in cache:
+            r = self.con.execute("SELECT * FROM incidents WHERE id = ?", (iid,)).fetchone()
+            cache[iid] = dict(r) if r else None
+        return cache[iid]
+
+    def record_programs(self, entity, row):
+        """(program ids the record belongs to, its incident row or None)."""
+        if entity == "programs":
+            return {row["id"]}, None
+        if entity == "incidents":
+            return set(parse_refs(row["programs"])), dict(row)
+        iid = incident_id_of(entity, row)
+        inc = self.incident_row(iid) if iid else None
+        return (set(parse_refs(inc["programs"])) if inc else set()), inc
+
+    def owns(self, row, u):
+        row = dict(row)
+        local = not row.get("mesh_origin") or row.get("mesh_origin") == NODE["id"]
+        return bool(local and row.get("created_by") and u and row["created_by"].lower() == u["username"].lower())
+
+    def can_modify(self, entity, row):
+        u = self.current_user()
+        if not u:
+            return False
+        if u["role"] == "admin":
+            return True
+        if ENTITIES[entity].get("append_only"):
+            return False
+        if self.owns(row, u):
+            return True
+        pa = self.access()["program_admin"]
+        if entity == "programs":
+            return row["id"] in pa
+        progs, inc = self.record_programs(entity, row)
+        # A program admin manages records of their program that its own members opened or submitted.
+        # (Putting your program on someone else's incident only tags it; it doesn't hand you their records.)
+        for pid in progs & pa:
+            if self.member_of(inc and inc.get("created_by"), pid) or self.member_of(dict(row).get("created_by"), pid):
+                return True
+        return entity == "checkins" and inc is not None and self.owns(inc, u)
+
+    def member_of(self, username, pid):
+        if not username:
+            return False
+        cache = self.__dict__.setdefault("_member_of", {})
+        key = (username.lower(), pid)
+        if key not in cache:
+            cache[key] = bool(self.con.execute(
+                "SELECT 1 FROM memberships m JOIN users u ON u.id = m.user_id "
+                "WHERE u.username = ? AND m.kind = 'programs' AND m.ref_id = ?", (username, pid)).fetchone())
+        return cache[key]
+
+    def can_delete(self, entity, row):
+        """Same as editing, except whole programs and agencies are deleted by server admins only."""
+        if entity in ("programs", "agencies"):
+            u = self.current_user()
+            return bool(u and u["role"] == "admin")
+        return self.can_modify(entity, row)
+
+    def row_out(self, entity, row):
+        return dict(out_row(entity, row), can_edit=self.can_modify(entity, row), can_delete=self.can_delete(entity, row))
+
+    def require_modify(self, entity, row):
+        self.require("viewer")
+        if not self.can_modify(entity, row):
+            what = ENTITIES[entity]["singular"].lower()
+            raise ApiError(403, f"Only the person who submitted this {what}, a program admin for its program, "
+                                "or a server admin can change it.")
+
     def publish(self, entity, action, rid, row, prev=None):
         BUS.publish(change_event(self.con, entity, action, rid, row, prev))
         MESH.kick()
@@ -3475,7 +3879,7 @@ class Handler(BaseHTTPRequestHandler):
                 # reads as "their" program's TACISS
                 ids = user.get("programs") or []
                 user["program_info"] = [dict(r) for r in self.con.execute(
-                    "SELECT id, name, kind, status, counties, region, coordinator, coordinator_call, frequencies "
+                    "SELECT id, name, kind, status, counties, region, coordinator, coordinator_call, frequencies, logo "
                     f"FROM programs WHERE id IN ({','.join('?' * len(ids))}) ORDER BY name", ids)] if ids else []
             return self.send_json({"user": user, "needs_setup": needs_setup,
                                    "public_read": CONFIG["public_read"], "version": VERSION,
@@ -3484,6 +3888,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.api_weather(method, parts[1:], qs)
         if head == "aprs":
             return self.api_aprs(method, parts[1:], qs)
+        if head == "meshcore":
+            return self.api_meshcore(method, parts[1:], qs)
         if head == "feeds":
             return self.api_feeds(method, parts[1:])
         if head == "reports" and len(parts) == 3 and parts[2] == "nws":
@@ -3529,9 +3935,10 @@ class Handler(BaseHTTPRequestHandler):
             acc = access_for(self.con, u)
             for k in MEMBER_KINDS:
                 out[k] = sorted(acc[k])
+            out["program_admin"] = sorted(acc["program_admin"])
         return out
 
-    def set_memberships(self, uid, kind, ids):
+    def set_memberships(self, uid, kind, ids, admin_ids=None):
         if not isinstance(ids, list) or len(ids) > 500:
             raise ApiError(400, f"{kind} must be a list of ids.")
         try:
@@ -3543,12 +3950,35 @@ class Handler(BaseHTTPRequestHandler):
                 f"SELECT id FROM {kind} WHERE id IN ({','.join('?' * len(ids))})", ids)}
             if len(found) != len(ids):
                 raise ApiError(400, f"Unknown {kind[:-1].replace('ie', 'y')} id.")
+        if kind == "programs" and admin_ids is not None:
+            admins = set(self.ids_list(admin_ids, "program_admin")) & set(ids)
+        else:  # keep existing program-admin roles for programs the user stays in
+            admins = {r[0] for r in self.con.execute(
+                "SELECT ref_id FROM memberships WHERE user_id = ? AND kind = ? AND role = 'admin'", (uid, kind))}
         self.con.execute("DELETE FROM memberships WHERE user_id = ? AND kind = ?", (uid, kind))
-        self.con.executemany("INSERT INTO memberships(user_id, kind, ref_id) VALUES (?,?,?)",
-                             [(uid, kind, i) for i in ids])
+        self.con.executemany("INSERT INTO memberships(user_id, kind, ref_id, role) VALUES (?,?,?,?)",
+                             [(uid, kind, i, "admin" if i in admins else "member") for i in ids])
+
+    @staticmethod
+    def ids_list(v, label):
+        if not isinstance(v, list) or len(v) > 2000:
+            raise ApiError(400, f"{label} must be a list of ids.")
+        try:
+            return sorted({int(x) for x in v})
+        except (TypeError, ValueError):
+            raise ApiError(400, f"{label} must be a list of ids.")
 
     def api_members(self, method, rest):
-        """/api/members/<programs|agencies>/<id>: who belongs to a program or served agency."""
+        """/api/members/<programs|agencies>/<id>: who belongs to a program or served agency.
+        Server admins manage any roster; a program admin manages their own program's roster
+        (members and program admins). /api/members/people lists users to pick from."""
+        if rest == ["people"] and method == "GET":
+            u = self.require("viewer")
+            if u["role"] != "admin" and not self.access()["program_admin"]:
+                raise ApiError(403, "Only server admins and program admins can list users.")
+            rows = self.con.execute("SELECT id, username, display_name, callsign, role FROM users "
+                                    "WHERE active = 1 ORDER BY username").fetchall()
+            return self.send_json([dict(r) for r in rows])
         if len(rest) != 2 or rest[0] not in MEMBER_KINDS:
             raise ApiError(404, "Not found.")
         kind = rest[0]
@@ -3558,32 +3988,35 @@ class Handler(BaseHTTPRequestHandler):
             raise ApiError(404, "Not found.")
         if not self.con.execute(f"SELECT 1 FROM {kind} WHERE id = ?", (rid,)).fetchone():
             raise ApiError(404, "Not found.")
+        u = self.require("viewer")
+        can_manage = u["role"] == "admin" or (kind == "programs" and rid in self.access()["program_admin"])
         if method == "GET":
-            self.require("viewer")
             rows = self.con.execute(
-                "SELECT u.id, u.username, u.display_name, u.callsign, u.role, u.active FROM memberships m "
-                "JOIN users u ON u.id = m.user_id WHERE m.kind = ? AND m.ref_id = ? ORDER BY u.username",
-                (kind, rid)).fetchall()
-            return self.send_json([dict(r) for r in rows])
+                "SELECT u.id, u.username, u.display_name, u.callsign, u.role, u.active, m.role AS member_role "
+                "FROM memberships m JOIN users u ON u.id = m.user_id WHERE m.kind = ? AND m.ref_id = ? "
+                "ORDER BY m.role = 'admin' DESC, u.username", (kind, rid)).fetchall()
+            out = [dict(r) for r in rows]
+            if self.headers.get("X-Members-Detail"):
+                return self.send_json({"members": out, "can_manage": can_manage})
+            return self.send_json(out)
         if method == "PUT":
-            self.require("admin")
+            if not can_manage:
+                raise ApiError(403, "Only a server admin or this program's program admins can change its members.")
             body = self.read_json()
-            ids = body.get("user_ids")
-            if not isinstance(ids, list) or len(ids) > 2000:
-                raise ApiError(400, "user_ids must be a list.")
-            try:
-                ids = sorted({int(x) for x in ids})
-            except (TypeError, ValueError):
-                raise ApiError(400, "user_ids must be a list of ids.")
+            ids = self.ids_list(body.get("user_ids"), "user_ids")
+            admins = set(self.ids_list(body.get("admin_ids") or [], "admin_ids")) & set(ids) if kind == "programs" else set()
             if ids:
                 found = {r[0] for r in self.con.execute(
                     f"SELECT id FROM users WHERE id IN ({','.join('?' * len(ids))})", ids)}
                 if len(found) != len(ids):
                     raise ApiError(400, "Unknown user id.")
+            if u["role"] != "admin" and u["id"] not in admins:
+                raise ApiError(400, "You can't remove your own program-admin role. Ask another program admin "
+                                    "or a server admin.")
             self.con.execute("DELETE FROM memberships WHERE kind = ? AND ref_id = ?", (kind, rid))
-            self.con.executemany("INSERT INTO memberships(user_id, kind, ref_id) VALUES (?,?,?)",
-                                 [(i, kind, rid) for i in ids])
-            self.audit("members", kind, rid, f"{len(ids)} user(s)")
+            self.con.executemany("INSERT INTO memberships(user_id, kind, ref_id, role) VALUES (?,?,?,?)",
+                                 [(i, kind, rid, "admin" if i in admins else "member") for i in ids])
+            self.audit("members", kind, rid, f"{len(ids)} user(s), {len(admins)} program admin(s)")
             self.con.commit()
             BUS.publish({"entity": "members", "action": "update", "public": False})
             return self.api_members("GET", rest)
@@ -3686,6 +4119,11 @@ class Handler(BaseHTTPRequestHandler):
             prefs["wx_counties"] = sorted(set(c))
         if "wx_sound" in body:
             prefs["wx_sound"] = bool(body["wx_sound"])
+        if "wx_station" in body:
+            v = str(body["wx_station"] or "").strip().upper()
+            if v and not re.fullmatch(r"[A-Z0-9]{3,12}", v):
+                raise ApiError(400, "Unknown weather station.")
+            prefs["wx_station"] = v
         refilter = False
         if "aprs_ssid" in body:
             v = str(body["aprs_ssid"] or "").strip().lstrip("-")
@@ -3864,6 +4302,45 @@ class Handler(BaseHTTPRequestHandler):
         return self.send_json({"ok": True, "packet": packet, "server": reply,
                                "aprsfi": "https://aprs.fi/info/a/" + quote(label.strip())})
 
+    # ---- MeshCore ---------------------------------------------------------
+    def api_meshcore(self, method, rest, qs):
+        self.require("viewer")
+        if method != "GET":
+            raise ApiError(405, "Method not allowed.")
+        s = FeedService.settings()
+        sub = rest[0] if rest else "status"
+        if s.get("meshcore_enabled") != "1":
+            raise ApiError(400, "MeshCore is turned off in Admin -> Settings.")
+        if sub == "status":
+            links = []
+            for line in (s.get("meshcore_links") or "").splitlines():
+                name, _, url = line.partition("|")
+                if url.strip().startswith(("http://", "https://")):
+                    links.append({"name": name.strip()[:60], "url": url.strip()})
+            return self.send_json({"bbox": _bbox(s, "meshcore_bbox"), "days": int(s.get("meshcore_days") or 14),
+                                   "analyzer": s.get("meshcore_analyzer_url") or "", "regions": MESHCORE.regions(s),
+                                   "channels": s.get("meshcore_channels") or "",
+                                   "embed": s.get("meshcore_embed_url") or "", "links": links})
+        if sub == "nodes":
+            res = MESHCORE.map_nodes(s)
+            try:
+                days = max(1, min(int((qs.get("days") or [s.get("meshcore_days") or "14"])[0]), 3650))
+            except ValueError:
+                days = 14
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            data = [n for n in (res["data"] or []) if (n.get("last") or "") >= cutoff]
+            return self.send_json(dict(res, data=data, total_in_area=len(res["data"] or [])))
+        handlers = {"packets": MESHCORE.packets, "observers": MESHCORE.observers, "live-nodes": MESHCORE.nodes,
+                    "channels": MESHCORE.channels}
+        if sub in handlers:
+            return self.send_json(handlers[sub](s))
+        if sub == "messages":
+            ch = (qs.get("channel") or [""])[0]
+            if not ch or len(ch) > 80:
+                raise ApiError(400, "Pick a channel.")
+            return self.send_json(MESHCORE.messages(s, ch))
+        raise ApiError(404, "Not found.")
+
     # ---- weather ----------------------------------------------------------
     def api_weather(self, method, rest, qs):
         if not self.can_read(True):
@@ -3883,6 +4360,30 @@ class Handler(BaseHTTPRequestHandler):
             if not (-90 <= lat <= 90 and -180 <= lon <= 180):
                 raise ApiError(400, "lat/lon out of range.")
             return self.send_json(WX.forecast(lat, lon))
+        if sub == "stations" and method == "GET":
+            out = WX.stations()
+            for a in APRS.snapshot(3):  # APRS / CWOP home weather stations heard in the last 3 hours
+                if a.get("wx") and a.get("lat") is not None:
+                    out.append({"id": a["call"], "name": (a.get("comment") or "")[:60], "lat": a["lat"], "lon": a["lon"],
+                                "source": "aprs", "wx": a["wx"], "last": a["last"]})
+            return self.send_json(out)
+        if sub == "station" and method == "GET":
+            sid = (qs.get("id") or [""])[0].upper()
+            if not re.fullmatch(r"[A-Z0-9]{3,12}", sid):
+                raise ApiError(400, "Unknown station.")
+            return self.send_json(WX.observation(sid))
+        if sub == "now" and method == "GET":
+            # current conditions for the signed-in user: their chosen station, else the one nearest the map center
+            u = self.current_user()
+            try:
+                prefs = json.loads((u or {}).get("prefs") or "{}")
+            except ValueError:
+                prefs = {}
+            sid = prefs.get("wx_station")
+            if not sid:
+                s = WX.settings()
+                sid = WX.nearest_station(float(s["map_lat"]), float(s["map_lon"]))
+            return self.send_json(dict(WX.observation(sid), chosen=bool(prefs.get("wx_station"))))
         if sub == "product" and method == "GET":
             ptype = (qs.get("type") or ["HWO"])[0].upper()
             office = (qs.get("office") or [""])[0].upper()
@@ -3951,8 +4452,8 @@ class Handler(BaseHTTPRequestHandler):
             row = None
         if not row or self.record_hidden("reports", row):
             raise ApiError(404, "Report not found.")
-        if row["created_by"] != u["username"] and ROLE_RANK[u["role"]] < ROLE_RANK["operator"]:
-            raise ApiError(403, "Only the reporter or an operator can mark this as sent.")
+        if not self.can_modify("reports", row):
+            raise ApiError(403, "Only the reporter, a program admin for its program, or a server admin can mark this as sent.")
         via = str(self.read_json().get("via") or "").strip()[:60] or "other"
         note = f"{via} by {u['callsign'] or u['username']} at {now_iso()}"
         self.con.execute("UPDATE reports SET nws_sent = ?, updated_at = ?, updated_by = ? WHERE id = ?",
@@ -4250,8 +4751,33 @@ class Handler(BaseHTTPRequestHandler):
                 raise ApiError(400, "aprs_range_km must be 5-2000.")
             if k == "aprs_server" and not re.fullmatch(r"[A-Za-z0-9.-]+:\d{2,5}", v):
                 raise ApiError(400, "aprs_server must look like rotate.aprs2.net:14580")
-            if k in ("feeds_enabled", "mesh_enabled", "mesh_discoverable", "aprs_enabled", "aprs_tx_enabled") \
-                    and v not in ("0", "1"):
+            if k == "meshcore_bbox":
+                try:
+                    s_, w_, n_, e_ = (float(x) for x in v.split(","))
+                    assert -90 <= s_ < n_ <= 90 and -180 <= w_ < e_ <= 180
+                except (ValueError, AssertionError):
+                    raise ApiError(400, "meshcore_bbox must be south,west,north,east, e.g. 34.9,-90.4,36.7,-81.6")
+            if k == "meshcore_days" and not (v.isdigit() and 1 <= int(v) <= 365):
+                raise ApiError(400, "meshcore_days must be 1-365.")
+            if k in ("meshcore_map_url", "meshcore_analyzer_url", "meshcore_embed_url") and v:
+                u_ = urlparse(v)
+                if u_.scheme not in ("http", "https") or not u_.hostname:
+                    raise ApiError(400, f"{k} must be a web address like https://analyzer.example.org")
+                if k == "meshcore_embed_url" and u_.scheme != "https":
+                    raise ApiError(400, "The embedded MeshCore view must be an https:// address.")
+                if k == "meshcore_analyzer_url":
+                    v = v.rstrip("/")
+            if k == "meshcore_channels":
+                names = [c.strip() for c in v.split(",") if c.strip()]
+                if len(names) > 50 or any(len(c) > 40 or not re.fullmatch(r"#?[\w .:+/-]+", c) for c in names):
+                    raise ApiError(400, "meshcore_channels must be channel names separated by commas, e.g. #weather,#wx,Public")
+                v = ",".join(names)
+            if k == "meshcore_regions":
+                v = ",".join(c for c in re.split(r"[\s,]+", v.upper()) if c)
+                if v and not re.fullmatch(r"[A-Z0-9-]{2,10}(,[A-Z0-9-]{2,10})*", v):
+                    raise ApiError(400, "meshcore_regions must be area codes like BNA,TYS,CHA.")
+            if k in ("feeds_enabled", "mesh_enabled", "mesh_discoverable", "aprs_enabled", "aprs_tx_enabled",
+                     "meshcore_enabled") and v not in ("0", "1"):
                 raise ApiError(400, f"{k} must be 0 or 1.")
             if k == "seoc_level" and v not in SEOC_LEVELS:
                 raise ApiError(400, "Invalid SEOC level.")
@@ -4279,6 +4805,8 @@ class Handler(BaseHTTPRequestHandler):
         self.con.commit()
         if any(c.split("=")[0].startswith(("aprs", "map_lat", "map_lon")) for c in changed):
             APRS.refilter()
+        if any(c.startswith("meshcore_") for c in changed):
+            _EMBED["t"] = 0.0  # pick up a new embed address right away
         BUS.publish({"entity": "settings", "action": "update"})
         if any(c.startswith(("wx_states=", "wx_enabled=")) for c in changed):
             threading.Thread(target=WX.poll, daemon=True).start()  # refresh alerts for the new area now
@@ -4311,7 +4839,7 @@ class Handler(BaseHTTPRequestHandler):
                 raise ApiError(409, "That username already exists.")
             for kind in MEMBER_KINDS:
                 if kind in body:
-                    self.set_memberships(cur.lastrowid, kind, body[kind])
+                    self.set_memberships(cur.lastrowid, kind, body[kind], body.get("program_admin"))
             self.audit("create", "users", cur.lastrowid, username)
             self.con.commit()
             if any(k in body for k in MEMBER_KINDS):
@@ -4350,9 +4878,11 @@ class Handler(BaseHTTPRequestHandler):
                     check_password_policy(body["password"])
                     sets.append("password_hash = ?")
                     args.append(hash_password(body["password"]))
+                if "program_admin" in body and "programs" not in body:  # only the admin flags changed
+                    body["programs"] = sorted(access_for(self.con, dict(row))["programs"])
                 member_changes = [k for k in MEMBER_KINDS if k in body]
                 for kind in member_changes:
-                    self.set_memberships(uid, kind, body[kind])
+                    self.set_memberships(uid, kind, body[kind], body.get("program_admin"))
                 if sets or member_changes:
                     if sets:
                         self.con.execute(f"UPDATE users SET {', '.join(sets)} WHERE id = ?", (*args, uid))
@@ -4398,9 +4928,71 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(pdf)
 
+    def api_program_logo(self, method, rid):
+        """GET/PUT/DELETE /api/programs/<id>/logo. Upload body is the raw image (PNG, JPEG, GIF or WebP)."""
+        try:
+            pid = int(rid)
+        except ValueError:
+            raise ApiError(404, "Not found.")
+        row = self.con.execute("SELECT * FROM programs WHERE id = ?", (pid,)).fetchone()
+        if not row:
+            raise ApiError(404, "Program not found.")
+        folder = os.path.join(CONFIG["data_dir"], "program-logos")
+        if method == "GET":
+            if not self.can_read(ENTITIES["programs"]["public"]):
+                raise ApiError(401, "Sign in required.")
+            ext = (row["logo"] or "").split(":")[0]
+            path = os.path.join(folder, f"{pid}.{ext}")
+            if ext not in LOGO_MIME or not os.path.isfile(path):
+                raise ApiError(404, "This program has no logo.")
+            with open(path, "rb") as fh:
+                data = fh.read()
+            self.send_response(200)
+            self.send_header("Content-Type", LOGO_MIME[ext])
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "private, max-age=604800")  # URL carries the version
+            self.security_headers()
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        if method not in ("PUT", "DELETE"):
+            raise ApiError(405, "Method not allowed.")
+        self.require_modify("programs", row)
+        u = self.current_user()
+        value = None
+        if method == "PUT":
+            length = int(self.headers.get("Content-Length") or 0)
+            if length > MAX_LOGO:
+                raise ApiError(413, "Logo is too big. Use an image under 1.5 MB.")
+            data = self.rfile.read(length) if length else b""
+            ext = logo_type(data)
+            if not ext:
+                raise ApiError(415, "Upload a PNG, JPEG, GIF or WebP image.")
+            value = f"{ext}:{hashlib.sha1(data).hexdigest()[:12]}"
+        os.makedirs(folder, exist_ok=True)
+        for old in LOGO_MIME:
+            try:
+                os.remove(os.path.join(folder, f"{pid}.{old}"))
+            except OSError:
+                pass
+        if value:
+            with open(os.path.join(folder, f"{pid}.{ext}.tmp"), "wb") as fh:
+                fh.write(data)
+            os.replace(os.path.join(folder, f"{pid}.{ext}.tmp"), os.path.join(folder, f"{pid}.{ext}"))
+        self.con.execute("UPDATE programs SET logo = ?, updated_at = ?, updated_by = ? WHERE id = ?",
+                         (value, now_iso(), u["username"], pid))
+        mesh_stamp(self.con, "programs", pid)
+        self.audit("program_logo", "programs", pid, "uploaded" if value else "removed")
+        self.con.commit()
+        new = self.con.execute("SELECT * FROM programs WHERE id = ?", (pid,)).fetchone()
+        self.publish("programs", "update", pid, new, row)
+        return self.send_json(self.row_out("programs", new))
+
     def api_entity(self, method, entity, rest, qs):
         if entity == "incidents" and method == "GET" and len(rest) == 2 and rest[1] == "debrief.pdf":
             return self.api_debrief(rest[0])
+        if entity == "programs" and len(rest) == 2 and rest[1] == "logo":
+            return self.api_program_logo(method, rest[0])
         spec = ENTITIES[entity]
         fields = {f["name"] for f in spec["fields"]}
         refs_fields = {f["name"] for f in spec["fields"] if f["type"] == "refs"}
@@ -4424,11 +5016,26 @@ class Handler(BaseHTTPRequestHandler):
                 sql += " WHERE " + " AND ".join(where)
             sql += " ORDER BY id DESC LIMIT ?"
             rows = self.con.execute(sql, (*args, limit)).fetchall()
-            return self.send_json([out_row(entity, r) for r in rows if not self.record_hidden(entity, r)])
+            return self.send_json([self.row_out(entity, r) for r in rows if not self.record_hidden(entity, r)])
 
         if method == "POST" and not rest:
-            u = self.require(spec["create"])
+            u = self.require("viewer")
+            via_pa = ROLE_RANK[u["role"]] < ROLE_RANK[spec["create"]]  # creating only because they're a program admin
+            pa = self.access()["program_admin"]
+            if via_pa and not (spec.get("program_admin_create") and pa):
+                raise ApiError(403, f"Requires {spec['create']} role.")
             rec = clean_record(entity, self.read_json(), partial=False)
+            if via_pa and entity == "incidents":
+                progs = set(parse_refs(rec.get("programs")))
+                if not progs & pa:
+                    if len(pa) != 1:
+                        raise ApiError(400, "Assign the incident to your program.")
+                    progs |= pa  # their one program
+                rec["programs"] = json.dumps(sorted(progs))
+            elif via_pa and rec.get("incident_id") is not None:
+                inc = self.incident_row(rec["incident_id"])
+                if not inc or not set(parse_refs(inc["programs"])) & pa:
+                    raise ApiError(403, "Program admins can add these only to incidents assigned to their program.")
             self.check_refs(entity, rec)
             ts = now_iso()
             rec.update(created_at=ts, updated_at=ts, created_by=u["username"], updated_by=u["username"])
@@ -4442,7 +5049,7 @@ class Handler(BaseHTTPRequestHandler):
             self.con.commit()
             row = self.con.execute(f"SELECT * FROM {entity} WHERE id = ?", (rid,)).fetchone()
             self.publish(entity, "create", rid, row)
-            return self.send_json(out_row(entity, row), 201)
+            return self.send_json(self.row_out(entity, row), 201)
 
         if len(rest) != 1:
             raise ApiError(404, "Not found.")
@@ -4460,13 +5067,22 @@ class Handler(BaseHTTPRequestHandler):
             raise ApiError(404, f"{spec['singular']} not found.")
 
         if method == "GET":
-            return self.send_json(out_row(entity, row))
+            return self.send_json(self.row_out(entity, row))
 
         if method == "PUT":
-            u = self.require(spec["edit"])
-            rec = clean_record(entity, self.read_json(), partial=True)
+            body = self.read_json()
+            if entity == "incidents" and not self.can_modify(entity, row) and set(body) == {"programs"}:
+                # a program admin may put their own program on (or take it off) any incident they can see
+                u = self.require("viewer")
+                old, new = set(parse_refs(row["programs"])), set(parse_refs(clean_record(entity, body, partial=True)["programs"]))
+                if not self.access()["program_admin"] or not (old ^ new) <= self.access()["program_admin"]:
+                    raise ApiError(403, "You can only add or remove your own program on this incident.")
+            else:
+                self.require_modify(entity, row)
+            u = self.current_user()
+            rec = clean_record(entity, body, partial=True)
             if not rec:
-                return self.send_json(out_row(entity, row))
+                return self.send_json(self.row_out(entity, row))
             self.check_refs(entity, rec)
             rec.update(updated_at=now_iso(), updated_by=u["username"])
             self.con.execute(f"UPDATE {entity} SET {', '.join(c + ' = ?' for c in rec)} WHERE id = ?",
@@ -4479,10 +5095,12 @@ class Handler(BaseHTTPRequestHandler):
             self.con.commit()
             new = self.con.execute(f"SELECT * FROM {entity} WHERE id = ?", (rid,)).fetchone()
             self.publish(entity, "update", rid, new, row)
-            return self.send_json(out_row(entity, new))
+            return self.send_json(self.row_out(entity, new))
 
         if method == "DELETE":
-            self.require(spec["delete"])
+            self.require_modify(entity, row)
+            if not self.can_delete(entity, row):
+                raise ApiError(403, f"Only a server admin can delete a {spec['singular'].lower()}.")
             scope = self.scope_of(entity, row)  # for the live event, before the incident row is gone
             delete_record(self.con, entity, rid, log=True)
             self.audit("delete", entity, rid, str(row["title"] if "title" in row.keys() else

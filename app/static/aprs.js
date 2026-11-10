@@ -55,7 +55,7 @@ VIEWS.aprs = async (root) => {
       : (s.error || 'Waiting for APRS-IS…');
   };
   paintStatus(st);
-  root.append(h('div', { class: 'toolbar' }, h('h2', {}, '📡 APRS'), pill, info,
+  root.append(h('div', { class: 'toolbar' }, h('h2', {}, 'APRS'), pill, info,
     h('a', { class: 'btn right', target: '_blank', rel: 'noopener',
       href: `https://aprs.fi/#!lat=${st.center[0]}&lng=${st.center[1]}&z=9` }, 'Open area on aprs.fi ↗')));
 

@@ -140,7 +140,7 @@ sudo ufw allow 47474/udp
    - **operator** can also run incidents, logs and resources.
    - **admin** can do everything.
 2. **Add your programs and agencies** (ARES, CERT, the EOC, and so on) so incidents can be assigned to them.
-3. **Linking several TACISS boxes** (field kits plus the EOC)? Open the **🕸 Mesh** tab. Nearby kits show up under **📡 Nearby nodes**. Click **Pair…** and enter the pairing code from the other box. See [Mesh](README.md#-mesh-linking-taciss-nodes-raspberry-pi-kits-eocs).
+3. **Linking several TACISS boxes** (field kits plus the EOC)? Open the **TACISS Mesh** tab. Nearby kits show up under **📡 Nearby nodes**. Click **Pair…** and enter the pairing code from the other box. See [Mesh](README.md#-mesh-linking-taciss-nodes-raspberry-pi-kits-eocs).
 4. **Want it reachable from the internet?** See [Making it reachable online](README.md#making-it-reachable-online).
 
 ## Updating

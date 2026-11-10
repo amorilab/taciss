@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>TACISS</title>
 <link rel="stylesheet" href="/static/vendor/leaflet/leaflet.css">
-<link rel="stylesheet" href="/static/style.css?v=17">
+<link rel="stylesheet" href="/static/style.css?v=20">
 <link rel="icon" href="/static/logo-32.png?v=5" sizes="32x32" type="image/png">
 <link rel="icon" href="/static/logo-192.png?v=5" sizes="192x192" type="image/png">
 <link rel="apple-touch-icon" href="/static/logo-192.png?v=5">
@@ -19,6 +19,7 @@
   <div class="clocks">
     <span id="clock-local">--:--:--</span>
     <span id="clock-utc" title="UTC / Zulu">--:--:--Z</span>
+    <span id="wx-now" class="wx-now" hidden></span>
   </div>
   <div id="status-bar" class="status-bar lvl-normal">
     <span id="status-text">STATUS NORMAL</span>
@@ -36,10 +37,11 @@
 <main id="view" class="view"><p class="muted pad">Loading…</p></main>
 <div id="toasts" class="toasts" aria-live="polite"></div>
 <script src="/static/vendor/leaflet/leaflet.js"></script>
-<script src="/static/app.js?v=17"></script>
-<script src="/static/weather.js?v=6"></script>
-<script src="/static/warroom.js?v=1"></script>
-<script src="/static/mesh.js?v=3"></script>
-<script src="/static/aprs.js?v=3"></script>
+<script src="/static/app.js?v=24"></script>
+<script src="/static/weather.js?v=7"></script>
+<script src="/static/warroom.js?v=2"></script>
+<script src="/static/mesh.js?v=4"></script>
+<script src="/static/aprs.js?v=4"></script>
+<script src="/static/meshcore.js?v=4"></script>
 </body>
 </html>

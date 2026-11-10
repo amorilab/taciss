@@ -85,6 +85,8 @@ jobs:
           python3 tests/test_discovery.py
           python3 tests/test_debrief.py
           python3 tests/test_aprs.py
+          python3 tests/test_permissions.py
+          python3 tests/test_meshcore.py
       - name: Offline update from a release file keeps data
         run: |
           mkdir -p /tmp/rel/taciss-9.9.9

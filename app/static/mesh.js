@@ -75,7 +75,7 @@ VIEWS.mesh = async (root) => {
         h('div', { class: 'muted' }, 'Pairing code — good for ', r.hours, ' h, one use'),
         h('div', { class: 'code mono' }, r.code),
         h('ol', { class: 'plain-ol' },
-          h('li', {}, 'On the other node open the ', h('b', {}, '🕸 Mesh'), ' tab → ', h('b', {}, 'Join a node'), '.'),
+          h('li', {}, 'On the other node open the ', h('b', {}, 'TACISS Mesh'), ' tab → ', h('b', {}, 'Join a node'), '.'),
           h('li', {}, 'Address: ', h('code', {}, r.node.url || '(set “This node’s address” above first)')),
           h('li', {}, 'Enter this code and pick the same link type.')),
         h('button', { class: 'small', type: 'button', onclick: () => navigator.clipboard && navigator.clipboard.writeText(r.code).then(() => toast('Code copied')) }, '⧉ Copy code')));
@@ -119,7 +119,7 @@ VIEWS.mesh = async (root) => {
     jform.elements.link.dispatchEvent(new Event('change'));
     jform.scrollIntoView({ behavior: 'smooth', block: 'center' });
     jform.elements.code.focus();
-    toast(`Ask ${d.name} for a pairing code (🕸 Mesh → Invite another node), then enter it here.`);
+    toast(`Ask ${d.name} for a pairing code (TACISS Mesh → Invite another node), then enter it here.`);
   };
   const nearbyBody = h('div');
   const drawNearby = (list, status) => {
@@ -205,7 +205,7 @@ VIEWS.mesh = async (root) => {
       h('button', { class: 'small ghost', onclick: async () => { await api('DELETE', 'mesh/invites/' + i.id); reload(); } }, 'Cancel'))))) : null;
 
   root.append(...[
-    h('div', { class: 'toolbar' }, h('h2', {}, '🕸 Mesh — linked TACISS nodes'),
+    h('div', { class: 'toolbar' }, h('h2', {}, 'TACISS Mesh — linked TACISS nodes'),
       h('span', { class: 'muted' }, `${st.log.records} shared records · ${st.peers.length} peer${st.peers.length === 1 ? '' : 's'}`,
         st.pending ? ` · ${st.pending} waiting on related records` : ''),
       h('button', { class: 'right', onclick: reload }, '⟳ Refresh')),

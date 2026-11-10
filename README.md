@@ -31,14 +31,14 @@ Updating a running server: `sudo taciss update`. See [Updates and releases](#upd
 
 - **Dashboard**: SEOC activation level bar (Normal / Monitoring / Partial / Full), local and Zulu clocks, open incidents, recent reports, program map and status counts
 - **Incidents**: type, priority, status, IC/net control, frequency and location. Each incident has its own **ICS-214-style activity log** (printable), linked reports, assigned resources and a chat channel. Incidents can be **open** to everyone or **🔒 restricted** to their assigned programs and served agencies.
-- **🛰 SITREP War Room**: your SITREPs, storm, damage, net and shelter reports (viewers can submit them too, which suits spotters in the field), alongside live NWS/SPC/Spotter Network storm reports, NWS warnings, radar, a camera wall, and power and internet outages. Storm and damage reports can be handed off to the NWS. See [SITREP War Room](#sitrep-war-room).
+- **SITREP War Room**: your SITREPs, storm, damage, net and shelter reports (viewers can submit them too, which suits spotters in the field), alongside live NWS/SPC/Spotter Network storm reports, NWS warnings, radar, a camera wall, and power and internet outages. Storm and damage reports can be handed off to the NWS. See [SITREP War Room](#sitrep-war-room).
 - **Programs**: ARES/RACES/Skywarn/CERT groups with coordinator, callsign, frequencies/tones, counties and status
 - **Agencies**: served agencies with contact info
 - **Resources**: people, teams, go-kits, repeaters, shelters and generators, with available/assigned/out-of-service status and incident assignment
 - **Chat**: `#general`, `#ops`, `#net-control`, plus an automatic channel for each open incident
 - **Map**: incidents, reports from the last 24h, programs and agencies. A NEXRAD radar overlay is available when online.
-- **🕸 Mesh**: pair TACISS nodes (Raspberry Pi kits, EOC servers) over LAN, AREDN, Tailscale/WireGuard or the internet; they share incidents, logs, reports and chat store-and-forward style and keep working offline. See [Mesh](#-mesh-linking-taciss-nodes-raspberry-pi-kits-eocs).
-- **Accounts and roles**: `viewer` (read, chat, submit reports), `operator` (manage incidents, logs, resources, SEOC level), `admin` (users, settings, audit log, JSON export)
+- **TACISS Mesh**: pair TACISS nodes (Raspberry Pi kits, EOC servers) over LAN, AREDN, Tailscale/WireGuard or the internet; they share incidents, logs, reports and chat store-and-forward style and keep working offline. See [Mesh](#-mesh-linking-taciss-nodes-raspberry-pi-kits-eocs).
+- **Accounts and roles**: `viewer` (read, chat, submit reports), `operator` (open incidents, log, check in stations, add resources, SEOC level), `admin` = server admin (users, settings, programs, agencies, audit log, JSON export), plus **program admins** per program. People can change only what they submitted; see [Who can change what](#who-can-change-what).
 - **Security**: PBKDF2 password hashing, login throttling, HttpOnly cookies, CSRF guard, strict CSP and a full audit log
 
 ## Option 1: TACISS installer ISO (easiest)
@@ -191,11 +191,37 @@ Install Tailscale on the box and on each member's device. They reach `http://<bo
 
 A restricted incident hides everything attached to it: its activity log, net check-ins, linked reports, assigned resources and incident chat. It also drops out of the counts, the map and live notifications. To anyone without access it looks like it doesn't exist (404). An operator outside the incident's programs can't view, edit or log to it.
 
+### Who can change what
+
+| | Server admin | Program admin (of that program) | Operator / viewer |
+|---|---|---|---|
+| Create programs and agencies | ✓ | | |
+| Edit a program | ✓ | their own program | |
+| Delete a program or agency, edit an agency | ✓ | | |
+| Add/remove program members and program admins | ✓ | their own program | |
+| Create incidents, resources, cameras | ✓ | ✓ (new incidents go to their program) | operators |
+| Put their program on (or take it off) any incident they can see | ✓ | ✓ | |
+| Edit or delete an incident | ✓ | assigned to their program and opened by one of its members | ones they opened |
+| Edit or delete reports, SITREPs, storm reports | ✓ | on their program's incidents, when opened or submitted by its members | ones they submitted |
+| Update net check-ins | ✓ | on their program's incidents | ones they logged, or all of them if they opened the incident (net control) |
+| Edit resources and cameras | ✓ | | ones they added |
+| Edit activity-log entries and chat | ✓ | | (append-only) |
+
+Everyone can still **add** what their role allows (operators open incidents and log check-ins; viewers submit reports). Program admins can add incidents, log entries, check-ins, resources and cameras even if their role is viewer. Putting your program on someone else's incident only tags it for your program: it doesn't let you edit their records. Records you can't change open read-only.
+
+**Program logos:** a program admin (or server admin) can upload a logo (PNG, JPEG, GIF or WebP, up to 1.5 MB) from the program's window. It shows in the program list, on the dashboard banner for its members, and on the dashboard. Logos are stored on each server; a node that syncs the program over TACISS Mesh shows it once the logo is uploaded there too.
+
+Make someone a program admin in **Admin → Users** (tick **★ Program admin for**), or have an existing program admin do it from the program's **✎ Edit members** button. Records synced from another TACISS node belong to that node's users, so a same-named account here doesn't own them.
+
 **Served-agency logins:** give agency staff an account (usually the `viewer` role) and assign them to their agency. Their dashboard then opens with a **🏛 Serving *agency*** panel listing every incident (restricted ones included) and program that is serving that agency. Membership changes take effect live, with no need to sign out.
 
 ## Weather (NWS)
 
-The **⛈ Weather** tab and the dashboard alert ticker use data from the National Weather Service (`api.weather.gov`). The TACISS server polls active alerts every 60 seconds and serves everything to browsers itself, so LAN clients don't need their own internet connection. Radar images and the SPC outlook are the exception: those load straight from NWS/SPC and do need internet on the viewing device. If the server goes offline, the last alerts it received stay visible, marked as stale.
+The **Weather** tab and the dashboard alert ticker use data from the National Weather Service (`api.weather.gov`). The TACISS server polls active alerts every 60 seconds and serves everything to browsers itself, so LAN clients don't need their own internet connection. Radar images and the SPC outlook are the exception: those load straight from NWS/SPC and do need internet on the viewing device. If the server goes offline, the last alerts it received stay visible, marked as stale.
+
+- **Forecast** follows the NWS office picked at the top of the Weather tab (Morristown, Nashville, Memphis...), so each office button shows that office's area forecast alongside its radar and products.
+- **Weather stations**: search every NWS observation station in your alert states (airports, mesonets, COOP) plus APRS/CWOP home weather stations heard on the APRS feed, nearest first, and click one for current conditions. **Use as my station** picks the station for you.
+- **Top bar**: signed-in users see the current temperature and conditions (for example "☀ 72°F Sunny") next to the clocks, from their chosen station or the one nearest the map center. Hover it to see which station and when it was observed. It refreshes every 10 minutes.
 
 The tab includes:
 - **Active alerts** for your state, which you can filter to your counties
@@ -216,7 +242,7 @@ The tab includes:
 
 ## SITREP War Room
 
-The **🛰 SITREP War Room** tab puts the whole picture on one screen. **⛶ War-room mode** turns it into a full-screen wall display. Like the weather data, every feed is fetched by the TACISS server and passed on to browsers, so LAN users don't need their own internet. When a source can't be reached, the last saved copy stays on screen with a warning. Live feeds are shown to signed-in users only.
+The **SITREP War Room** tab puts the whole picture on one screen. **⛶ War-room mode** turns it into a full-screen wall display. Like the weather data, every feed is fetched by the TACISS server and passed on to browsers, so LAN users don't need their own internet. When a source can't be reached, the last saved copy stays on screen with a warning. Live feeds are shown to signed-in users only.
 
 | Panel | Source | Key needed? |
 |---|---|---|
@@ -237,7 +263,7 @@ There's no open API for third parties to post reports to the NWS or Spotter Netw
 
 Other settings: `lsr_hours` (how far back storm reports go), `feeds_bbox` (the area for Spotter Network reports) and `outage_links`. The storm-report and outage feeds cover the states in `wx_states`.
 
-## 🕸 Mesh: linking TACISS nodes (Raspberry Pi kits, EOCs)
+## TACISS Mesh: linking TACISS nodes (Raspberry Pi kits, EOCs)
 
 Each TACISS install (a Raspberry Pi in a go-kit, a laptop at a shelter, the county EOC server) is a **node**. It keeps working on its own with no connection, and swaps changes with the nodes it's paired with whenever it can reach them. Everyone sees what the others are doing, and nothing is lost while a link is down.
 
@@ -250,7 +276,7 @@ Each TACISS install (a Raspberry Pi in a go-kit, a laptop at a shelter, the coun
 - **Never shared:** user accounts, passwords, memberships, settings and API keys. Each node has its own logins.
 - **🔒 Restricted incidents** (with their log, check-ins, reports and chat) go only to peers you mark **"share restricted incidents"**. If you lock an incident later, untrusted peers drop their copy. If you unlock it, they get it back.
 
-**Pairing two nodes** (admin, **🕸 Mesh** tab)
+**Pairing two nodes** (admin, **TACISS Mesh** tab)
 
 1. On node A, set **This node's address** (for example `http://10.54.3.21:8080`) and a **Node name**.
 2. On node A, click **Create pairing code**. You get a 20-character code that works once and expires after 24 h. It's easy to read over the radio.
@@ -289,7 +315,7 @@ A full scan runs every 2 minutes, or click **⌕ Look now**. To keep a node from
 
 ## APRS
 
-The **📡 APRS** tab shows live APRS traffic around your map center, gives you aprs.fi lookups, and lets each user send to APRS under their own callsign.
+The **APRS** tab shows live APRS traffic around your map center, gives you aprs.fi lookups, and lets each user send to APRS under their own callsign.
 
 - **Live map and station list.** TACISS keeps one read-only connection to the APRS-IS network (the internet side of APRS) for everything within **APRS area radius** km of the map center (default 150). You see positions, mobiles with speed and heading, weather stations, objects, status text and messages. It updates live. Click any station for details and an aprs.fi link.
 - **aprs.fi lookups.** Look up any callsign's last position or weather, anywhere in the world. An admin adds a free aprs.fi API key in **Admin → Settings** (aprs.fi → Account → API key).
@@ -301,6 +327,16 @@ To send, a user needs:
 2. their **APRS-IS passcode**, entered once under **My APRS setup** on the APRS tab. It's the same passcode APRSdroid, Xastir and other apps use. TACISS checks it against the callsign, keeps it on the server, and never shows it again.
 
 Packets sent through APRS-IS can be gated to RF by igates, so only licensed amateurs may send, under their own callsign, with plain-language amateur traffic. Sends are limited to one every 10 seconds and 60 an hour per user, and each one is recorded in the audit log. Admins can turn sending off (**Let users send to APRS** = 0) or turn APRS off entirely (**APRS live feed** = 0, or `TACISS_APRS=0` in `/etc/taciss/taciss.env` on networks that must not reach the internet).
+
+## MeshCore
+
+The **MeshCore** tab shows the MeshCore LoRa mesh around you, as seen by internet-connected observers:
+
+- **Node map and list.** Repeaters, companions, room servers and sensors in your area (**MeshCore area**, default Tennessee) from the public [MeshCore map](https://map.meshcore.dev/), filtered by how recently each was heard. TACISS downloads the worldwide list at most once an hour and keeps only your area. It streams the list rather than loading it whole, so it's fine on a Raspberry Pi, and the last copy stays viewable offline.
+- **Live packets, public channels and observers** come from a [CoreScope](https://github.com/Kpa-clawbot/CoreScope) analyzer. CoreScope is open source; observers (MeshCore radios with internet) report what they hear to it. Set **MeshCore analyzer URL** to one that covers your area (a regional MeshCore group may run one, or run your own), and optionally **MeshCore observer area codes** (airport codes such as BNA,TYS,CHA,MEM) to show just your region. Private messages and private channels stay encrypted; the analyzer decodes public channels.
+- **Web analyzer inside the tab.** **MeshCore web analyzer** (default [LetsMesh](https://analyzer.letsmesh.net/)) opens inside the tab, and **MeshCore links** adds buttons for other tools.
+
+Everything here needs internet on the TACISS server and is fetched only when someone opens the tab. Turn the tab off with **MeshCore tab on/off** = 0.
 
 ## Incident debrief kit
 

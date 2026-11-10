@@ -121,9 +121,11 @@ try:
     check("members GET for signed-in user", vw.call("GET", f"members/programs/{p1['id']}")[0] == 200)
 
     # opening the incident makes it visible to everyone
-    op1.call("PUT", f"incidents/{iid}", {"visibility": "open"})
+    check("a program member who didn't open it can't unlock it",
+          op1.call("PUT", f"incidents/{iid}", {"visibility": "open"})[0] == 403)
+    op2.call("PUT", f"incidents/{iid}", {"visibility": "open"})  # the operator who opened it
     check("after unlocking, viewer sees it", sees(vw))
-    op1.call("PUT", f"incidents/{iid}", {"visibility": "restricted"})
+    op2.call("PUT", f"incidents/{iid}", {"visibility": "restricted"})
     check("re-locked, viewer loses it", not sees(vw))
 
     # live stream: viewer must not be told about restricted changes; member must

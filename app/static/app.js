@@ -61,8 +61,8 @@ function toast(msg, isErr) {
 }
 function store(k, v) { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch { return null; } }
 
-async function api(method, path, body) {
-  const opt = { method, headers: { 'X-Requested-With': 'TACISS' }, credentials: 'same-origin' };
+async function api(method, path, body, headers) {
+  const opt = { method, headers: { 'X-Requested-With': 'TACISS', ...(headers || {}) }, credentials: 'same-origin' };
   if (body !== undefined) { opt.headers['Content-Type'] = 'application/json'; opt.body = JSON.stringify(body); }
   const r = await fetch('/api/' + path, opt);
   let data = null;
@@ -72,7 +72,10 @@ async function api(method, path, body) {
 }
 
 const can = (role) => !!S.me && RANK[S.me.role] >= RANK[role];
-const canDo = (entity, action) => can(S.schema.entities[entity][action]);
+const myAdminPrograms = () => (S.me && S.me.program_admin) || [];
+// program admins may also add incidents, check-ins, log entries, resources and cameras
+const canDo = (entity, action) => can(S.schema.entities[entity][action]) ||
+  (action === 'create' && !!S.schema.entities[entity].program_admin_create && myAdminPrograms().length > 0);
 const canRead = (entity) => !!S.me || (S.publicRead && S.schema.entities[entity].public);
 
 function load(entity) {
@@ -128,6 +131,7 @@ function renderChrome() {
   pe.textContent = mine.length ? mine[0].name + (mine.length > 1 ? ` +${mine.length - 1}` : '') : '';
   pe.title = mine.map((p) => p.name).join('\n');
   document.title = (mine.length ? mine[0].name + ' · ' : '') + (st.site_name || 'TACISS');
+  if (typeof loadWxNow === 'function') loadWxNow();  // current temperature and conditions (refreshes itself every 10 min)
   const lvl = st.seoc_level || 'normal';
   const bar = document.getElementById('status-bar');
   bar.className = 'status-bar lvl-' + lvl;
@@ -161,15 +165,16 @@ function renderChrome() {
   const items = [
     ['dashboard', 'Dashboard', true],
     ['incidents', 'Incidents', canRead('incidents')],
-    ['reports', '🛰 SITREP War Room', canRead('reports')],
+    ['reports', 'SITREP War Room', canRead('reports')],
     ['map', 'Map', canRead('incidents')],
-    ['weather', '⛈ Weather', !!S.me || S.publicRead],
+    ['weather', 'Weather', !!S.me || S.publicRead],
     ['programs', 'Programs', canRead('programs')],
     ['agencies', 'Agencies', canRead('agencies')],
     ['resources', 'Resources', canRead('resources')],
     ['chat', 'Chat', canRead('messages')],
-    ['aprs', '📡 APRS', !!S.me],
-    ['mesh', '🕸 Mesh', can('admin')],
+    ['aprs', 'APRS', !!S.me],
+    ['meshcore', 'MeshCore', !!S.me],
+    ['mesh', 'TACISS Mesh', can('admin')],
     ['admin', 'Admin', can('admin')],
   ];
   const cur = route().view;
@@ -236,10 +241,12 @@ function fieldInput(f, value, refs, disabled) {
 async function editRecord(entity, rec, defaults = {}) {
   const spec = S.schema.entities[entity];
   const isNew = !rec;
-  const editable = isNew ? canDo(entity, 'create') : canDo(entity, 'edit');
+  // the server says per record whether you may change it (submitter, program admin or server admin)
+  const editable = isNew ? canDo(entity, 'create') : !!rec.can_edit;
   const refs = {};
   for (const f of spec.fields) if (f.type === 'ref' || f.type === 'refs') refs[f.name] = await load(f.ref).catch(() => []);
-  const data = rec || { ...Object.fromEntries(spec.fields.map((f) => [f.name, f.default])), ...defaults };
+  const data = rec || { ...Object.fromEntries(spec.fields.map((f) => [f.name, f.default])),
+    ...(entity === 'incidents' && myAdminPrograms().length ? { programs: myAdminPrograms() } : {}), ...defaults };
   const err = h('div', { class: 'err' });
   const form = h('form', { class: 'grid-form', onsubmit: (e) => { e.preventDefault(); save(); } });
   for (const f of spec.fields) {
@@ -265,11 +272,12 @@ async function editRecord(entity, rec, defaults = {}) {
   }
   if (rec && rec.nws_sent) form.append(h('div', { class: 'full ok-note' }, '✅ Reported to NWS: ', rec.nws_sent));
   if (rec && entity === 'reports' && ['storm_report', 'damage'].includes(rec.kind) && !rec.nws_sent && S.me &&
-      (rec.created_by === S.me.username || can('operator')) && typeof nwsModal === 'function') {
+      rec.can_edit && typeof nwsModal === 'function') {
     form.append(h('div', { class: 'full' }, h('button', { type: 'button', class: 'small', onclick: () => { close(); nwsModal(rec); } }, '📤 Report to NWS')));
   }
   const meta = rec ? h('div', { class: 'meta' },
-    `Created ${fmtTime(rec.created_at)} by ${rec.created_by || '?'} · Updated ${fmtTime(rec.updated_at)} by ${rec.updated_by || '?'}`) : null;
+    `Created ${fmtTime(rec.created_at)} by ${rec.created_by || '?'} · Updated ${fmtTime(rec.updated_at)} by ${rec.updated_by || '?'}`,
+    !editable && S.me && !spec.append_only ? h('div', { class: 'muted small' }, '🔒 View only. Changes can be made by the person who submitted this, a program admin for its program, or a server admin.') : null) : null;
 
   async function save() {
     const body = {};
@@ -300,11 +308,57 @@ async function editRecord(entity, rec, defaults = {}) {
     } catch (e) { err.textContent = e.message; }
   }
   const actions = [];
-  if (rec && canDo(entity, 'delete')) actions.push(h('button', { class: 'danger left', onclick: del }, 'Delete'));
+  if (rec && rec.can_delete) actions.push(h('button', { class: 'danger left', onclick: del }, 'Delete'));
   actions.push(h('button', { onclick: () => close() }, editable ? 'Cancel' : 'Close'));
   if (editable) actions.push(h('button', { class: 'primary', onclick: save }, isNew ? 'Create' : 'Save'));
-  const extra = rec && (entity === 'programs' || entity === 'agencies') && S.me ? membersPanel(entity, rec) : null;
+  const extra = rec && (entity === 'programs' || entity === 'agencies') && S.me
+    ? [entity === 'programs' ? logoPanel(rec) : null, membersPanel(entity, rec)] : null;
   const close = modal((isNew ? 'New ' : editable ? 'Edit ' : '') + spec.singular, [form, extra, err, meta], actions);
+}
+
+// a program's logo (uploaded by its program admin or a server admin), or nothing
+const programLogoUrl = (p) => (p && p.logo ? `/api/programs/${p.id}/logo?v=${encodeURIComponent(p.logo.split(':')[1] || '')}` : null);
+function programLogo(p, size, cls) {
+  const url = programLogoUrl(p);
+  return url ? h('img', { class: 'prog-logo ' + (cls || ''), src: url, alt: '', width: size, height: size, loading: 'lazy',
+    onerror: (e) => e.target.remove() }) : null;
+}
+
+function logoPanel(rec) {
+  const box = h('div', { class: 'members' }, h('h4', {}, 'Program logo'));
+  const preview = h('div', { class: 'logo-preview' }, programLogo(rec, 72) || h('span', { class: 'muted' }, 'No logo yet.'));
+  box.append(preview);
+  if (rec.can_edit) {
+    const file = h('input', { type: 'file', accept: 'image/png,image/jpeg,image/gif,image/webp', hidden: true, onchange: async () => {
+      const f = file.files[0];
+      if (!f) return;
+      if (f.size > 1500000) return toast('That image is over 1.5 MB. Use a smaller one.', true);
+      try {
+        const r = await fetch(`/api/programs/${rec.id}/logo`, { method: 'PUT', credentials: 'same-origin',
+          headers: { 'X-Requested-With': 'TACISS', 'Content-Type': f.type || 'application/octet-stream' }, body: f });
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(data.error || 'Upload failed');
+        Object.assign(rec, data); delete S.cache.programs;
+        preview.replaceChildren(programLogo(rec, 72)); toast('Logo saved');
+        refreshMe();
+      } catch (e) { toast(e.message, true); }
+    } });
+    box.append(h('div', { class: 'btn-row' }, file,
+      h('button', { type: 'button', class: 'small', onclick: () => file.click() }, rec.logo ? 'Replace logo' : 'Upload logo'),
+      rec.logo ? h('button', { type: 'button', class: 'small ghost', onclick: async () => {
+        try {
+          const data = await api('DELETE', `programs/${rec.id}/logo`);
+          Object.assign(rec, data); delete S.cache.programs;
+          preview.replaceChildren(h('span', { class: 'muted' }, 'No logo yet.')); toast('Logo removed'); refreshMe();
+        } catch (e) { toast(e.message, true); }
+      } }, 'Remove') : null,
+      h('span', { class: 'hint' }, 'PNG, JPEG, GIF or WebP, up to 1.5 MB. A square image works best.')));
+  }
+  return box;
+}
+async function refreshMe() {
+  const me = await api('GET', 'me').catch(() => null);
+  if (me && me.user) { S.me = me.user; renderChrome(); }
 }
 
 /* Program / served-agency members (users), plus for an agency what is serving it. */
@@ -312,27 +366,44 @@ function membersPanel(kind, rec) {
   const box = h('div', { class: 'members' }, h('h4', {}, kind === 'programs' ? '👥 Program members' : '👥 Agency users'),
     h('div', { class: 'muted' }, 'Loading…'));
   (async () => {
-    const [members, inc, prog] = await Promise.all([
-      api('GET', `members/${kind}/${rec.id}`).catch(() => []),
+    const [detail, inc, prog] = await Promise.all([
+      api('GET', `members/${kind}/${rec.id}`, undefined, { 'X-Members-Detail': '1' }).catch(() => ({ members: [], can_manage: false })),
       kind === 'agencies' ? load('incidents').catch(() => []) : [],
       kind === 'agencies' ? load('programs').catch(() => []) : [],
     ]);
+    const members = detail.members;
     const kids = [box.firstChild];
     const who = (u) => [u.callsign, u.display_name || u.username].filter(Boolean).join(' · ');
-    kids.push(members.length ? h('div', { class: 'chips' }, members.map((u) => h('span', { class: 'chip' }, who(u))))
+    kids.push(members.length ? h('div', { class: 'chips' }, members.map((u) => h('span', { class: 'chip' + (u.member_role === 'admin' ? ' chip-admin' : ''),
+      title: u.member_role === 'admin' ? 'Program admin: manages this program, its incidents and their records' : '' },
+      u.member_role === 'admin' ? '★ ' : '', who(u), u.member_role === 'admin' ? h('span', { class: 'muted' }, ' · program admin') : null)))
       : h('div', { class: 'muted' }, 'No users assigned yet.'));
-    if (can('admin')) {
+    if (detail.can_manage) {
       kids.push(h('button', { type: 'button', class: 'small', onclick: async () => {
-        const users = await api('GET', 'users');
-        const pl = pickList('m', users.map((u) => ({ id: u.id, label: u.username, sub: [u.callsign, u.role].filter(Boolean).join(' ') })),
-          members.map((m) => m.id));
+        let people;
+        try { people = await api('GET', 'members/people'); } catch (e) { return toast(e.message, true); }
+        const cur = new Map(members.map((m) => [m.id, m.member_role]));
+        const rows = people.map((u) => {
+          const mem = h('input', { type: 'checkbox', checked: cur.has(u.id), 'data-id': u.id, class: 'm-mem' });
+          const adm = kind === 'programs' ? h('input', { type: 'checkbox', checked: cur.get(u.id) === 'admin', 'data-id': u.id, class: 'm-adm',
+            onchange: (e) => { if (e.target.checked) mem.checked = true; } }) : null;
+          mem.addEventListener('change', () => { if (!mem.checked && adm) adm.checked = false; });
+          return h('tr', {}, h('td', {}, u.username, h('div', { class: 'muted small' }, [u.callsign, u.display_name, u.role].filter(Boolean).join(' · '))),
+            h('td', { class: 'center' }, mem), kind === 'programs' ? h('td', { class: 'center' }, adm) : null);
+        });
+        const table = h('div', { class: 'table-wrap', style: 'max-height:50vh;overflow:auto' }, h('table', { class: 'data' },
+          h('thead', {}, h('tr', {}, h('th', {}, 'User'), h('th', {}, 'Member'), kind === 'programs' ? h('th', {}, 'Program admin') : null)),
+          h('tbody', {}, rows)));
         const close = modal(`Members: ${rec.name}`, [h('p', { class: 'muted' }, kind === 'programs'
-          ? 'Members can see restricted incidents this program is assigned to.'
-          : 'Users of this agency see the programs and incidents serving it, including restricted ones.'), pl], [
+          ? 'Members see restricted incidents this program is assigned to. Program admins can also edit this program, its incidents and their reports and check-ins, and manage this list.'
+          : 'Users of this agency see the programs and incidents serving it, including restricted ones.'), table], [
           h('button', { onclick: () => close() }, 'Cancel'),
           h('button', { class: 'primary', onclick: async () => {
-            try { await api('PUT', `members/${kind}/${rec.id}`, { user_ids: pickValue(pl) }); close(); toast('Members saved'); box.replaceWith(membersPanel(kind, rec)); }
-            catch (e) { toast(e.message, true); }
+            const pick = (cls) => [...table.querySelectorAll('input.' + cls + ':checked')].map((c) => +c.dataset.id);
+            try {
+              await api('PUT', `members/${kind}/${rec.id}`, { user_ids: pick('m-mem'), admin_ids: pick('m-adm') });
+              close(); toast('Members saved'); box.replaceWith(membersPanel(kind, rec));
+            } catch (e) { toast(e.message, true); }
           } }, 'Save'),
         ]);
       } }, '✎ Edit members'));
@@ -509,8 +580,9 @@ VIEWS.dashboard = async (root) => {
     .sort((a, b) => String(a.name).localeCompare(String(b.name))) : [];
   if (mine.length) root.append(h('div', { class: 'program-hero' }, mine.map((p) =>
     h('div', { class: 'ph-item', title: 'Open program details', onclick: () => editRecord('programs', p) },
-      h('div', { class: 'ph-kicker' }, (p.kind || 'Program') + (mine.length > 1 ? ' · One of your programs' : ' · Your program')),
-      h('div', { class: 'ph-name' }, p.name, ' ', badge(p.status)),
+      h('div', { class: 'ph-kicker' }, (p.kind || 'Program') + (mine.length > 1 ? ' · One of your programs' : ' · Your program') +
+        ((S.me.program_admin || []).includes(p.id) ? ' · ★ You are a program admin' : '')),
+      h('div', { class: 'ph-name' }, programLogo(p, 44, 'ph-logo'), p.name, ' ', badge(p.status)),
       h('div', { class: 'ph-meta' }, [p.counties && 'Counties: ' + p.counties, p.region && 'Region: ' + p.region,
         p.coordinator && `Coordinator: ${p.coordinator} ${p.coordinator_call || ''}`.trim(),
         p.frequencies && 'Frequencies: ' + p.frequencies].filter(Boolean).join('  ·  '))))));
@@ -545,7 +617,7 @@ VIEWS.dashboard = async (root) => {
         h('h4', {}, `📡 Programs (${progs.length})`),
         progs.length ? h('ul', { class: 'items' }, progs.map((p) =>
           h('li', { onclick: () => editRecord('programs', p) },
-            h('div', { class: 't' }, p.name, ' ', badge(p.status)),
+            h('div', { class: 't' }, programLogo(p, 20), p.name, ' ', badge(p.status)),
             h('div', { class: 's' }, [p.kind, p.coordinator && `${p.coordinator} ${p.coordinator_call || ''}`, p.frequencies].filter(Boolean).join(' · ')))))
           : h('div', { class: 'empty' }, 'No programs are linked to your agency yet.')));
   })() : null;
@@ -556,7 +628,7 @@ VIEWS.dashboard = async (root) => {
     : h('div', { class: 'empty' }, 'No recent reports');
   const progList = prog.length ? h('ul', { class: 'items' }, prog.map((p) =>
     h('li', { onclick: () => editRecord('programs', p) },
-      h('div', { class: 't' }, p.name, ' ', badge(p.status)),
+      h('div', { class: 't' }, programLogo(p, 20), p.name, ' ', badge(p.status)),
       h('div', { class: 's' }, [p.kind, p.counties, p.coordinator && `${p.coordinator} ${p.coordinator_call || ''}`, p.frequencies].filter(Boolean).join(' · ')))))
     : h('div', { class: 'empty' }, 'No programs yet');
 
@@ -596,6 +668,7 @@ function listView(entity, opts = {}) {
       if (f.type === 'refs') return refNames(refs[f.name], v);
       if (f.name === 'visibility') return v === 'restricted' ? badge('restricted') : h('span', { class: 'muted' }, 'open');
       if (f.name === 'title' && entity === 'incidents') return [lockIcon(r), isLocked(r) ? ' ' : '', v];
+      if (f.name === 'name' && entity === 'programs') return [programLogo(r, 20), v];
       if (f.name === 'status' || f.name === 'priority' || f.name === 'severity') return badge(v);
       if (f.choices) return nice(v);
       return v ?? '';
@@ -672,7 +745,16 @@ async function incidentDetail(root, id) {
       S.me && inc.status === 'closed' ? h('a', { class: 'btn primary no-print', href: `/api/incidents/${id}/debrief.pdf`,
         download: '', title: 'Download a PDF packet of everything recorded for this incident' }, '📄 Debrief kit (PDF)') : null,
       S.me && canDo('reports', 'create') ? h('button', { onclick: () => editRecord('reports', null, { incident_id: id, lat: inc.lat, lon: inc.lon }) }, '+ Report') : null,
-      h('button', { class: canDo('incidents', 'edit') ? 'primary' : '', onclick: () => editRecord('incidents', inc) }, canDo('incidents', 'edit') ? 'Edit' : 'Details')),
+      ...(inc.can_edit ? [] : myAdminPrograms().map((pid) => {
+        const on = (inc.programs || []).includes(pid);
+        const name = (progRows.find((p) => p.id === pid) || {}).name || 'my program';
+        return h('button', { class: 'no-print', title: 'You are a program admin of ' + name, onclick: async () => {
+          const programs = on ? inc.programs.filter((x) => x !== pid) : [...(inc.programs || []), pid];
+          try { await api('PUT', 'incidents/' + inc.id, { programs }); delete S.cache.incidents; toast(on ? 'Removed ' + name : 'Assigned to ' + name); render(); }
+          catch (e) { toast(e.message, true); }
+        } }, on ? '★ Remove ' + name : '★ Assign to ' + name);
+      })),
+      h('button', { class: inc.can_edit ? 'primary' : '', onclick: () => editRecord('incidents', inc) }, inc.can_edit ? 'Edit' : 'Details')),
     h('div', { class: 'grid cols-2' },
       h('div', { class: 'grid' },
         h('div', { class: 'card' }, h('h3', {}, 'Overview'), h('div', { class: 'card-body' }, kv,
@@ -763,17 +845,17 @@ function netCard(incId, rows, allRows) {
     h('datalist', { id: 'ci-calls-' + incId }, Object.values(known).map((k) => h('option', { value: k.callsign }, k.name || ''))));
   }
 
-  const statusCell = (r) => editable && r.status !== 'checked_out'
+  const statusCell = (r) => r.can_edit && r.status !== 'checked_out'
     ? h('select', { class: 'mini', value: r.status, onchange: (e) => upd(r, { status: e.target.value }, `${who(r)} now ${nice(e.target.value)}`) },
       ['checked_in', 'standby', 'assigned'].map((s) => h('option', { value: s }, nice(s))))
     : badge(r.status);
-  const trafficCell = (r) => editable && r.status !== 'checked_out'
+  const trafficCell = (r) => r.can_edit && r.status !== 'checked_out'
     ? h('select', { class: 'mini traffic-' + (r.traffic || 'none'), value: r.traffic || 'none', onchange: (e) => {
       const t = e.target.value;
       upd(r, { traffic: t }, t === 'none' ? `${r.callsign} traffic passed` : `${who(r)} has ${t} traffic`);
     } }, ['none', 'routine', 'priority', 'emergency'].map((t) => h('option', { value: t }, t === 'none' ? '—' : nice(t))))
     : (r.traffic && r.traffic !== 'none' ? badge(r.traffic) : '—');
-  const actions = (r) => !editable ? null : h('td', { class: 'no-print', style: 'white-space:nowrap' },
+  const actions = (r) => !editable ? null : !r.can_edit ? h('td', { class: 'no-print muted small', title: 'Only the operator who logged it, net control or a program admin can change it' }, '🔒') : h('td', { class: 'no-print', style: 'white-space:nowrap' },
     r.status !== 'checked_out'
       ? h('button', { class: 'small', title: 'Check out', onclick: () => upd(r, { status: 'checked_out', checked_out_at: new Date().toISOString() }, `${who(r)} checked out`) }, 'Check out')
       : h('button', { class: 'small', title: 'Check this station back in', onclick: async () => {
@@ -862,8 +944,13 @@ VIEWS.admin = async (root) => {
     ['nws_report_links', 'Report-to-NWS links (one per line: Name|https://…)'], ['outage_links', 'Outage map links (one per line: Name|https://…)'],
     ['aprs_enabled', 'APRS live feed on (1) / off (0)'], ['aprs_range_km', 'APRS area radius around map center (km)'],
     ['aprs_server', 'APRS-IS server (host:port)'], ['aprs_tx_enabled', 'Let users send to APRS on (1) / off (0)'],
-    ['aprsfi_api_key', 'aprs.fi API key (free, aprs.fi → Account)'], ['aprs_filter_extra', 'Extra APRS-IS filter (advanced)']];
-  const MULTI = new Set(['nws_report_links', 'outage_links']);
+    ['aprsfi_api_key', 'aprs.fi API key (free, aprs.fi → Account)'], ['aprs_filter_extra', 'Extra APRS-IS filter (advanced)'],
+    ['meshcore_enabled', 'MeshCore tab on (1) / off (0)'], ['meshcore_bbox', 'MeshCore area: south,west,north,east'],
+    ['meshcore_days', 'MeshCore: hide nodes not heard in N days'], ['meshcore_analyzer_url', 'MeshCore analyzer URL (CoreScope, e.g. https://analyzer.example.org)'],
+    ['meshcore_regions', 'MeshCore observer area codes (e.g. BNA,TYS,CHA,MEM)'], ['meshcore_channels', 'MeshCore: only these public channels (e.g. #weather,#wx,#bna-wx,Public; blank = all)'],
+    ['meshcore_embed_url', 'MeshCore web analyzer shown in the tab (https)'],
+    ['meshcore_map_url', 'MeshCore node map API (advanced)'], ['meshcore_links', 'MeshCore links (one per line: Name|https://…)']];
+  const MULTI = new Set(['nws_report_links', 'outage_links', 'meshcore_links']);
   const SECRET = new Set(['windy_api_key', 'tdot_api_key', 'aprsfi_api_key']);
   const sform = h('form', { class: 'grid-form card-body', onsubmit: async (e) => {
     e.preventDefault();
@@ -885,8 +972,11 @@ VIEWS.admin = async (root) => {
       u ? h('label', {}, 'Active', h('select', { name: 'active', value: u.active ? '1' : '0' }, h('option', { value: '1' }, 'Active'), h('option', { value: '0' }, 'Disabled'))) : null,
       h('div', { class: 'field' }, 'Programs', pickList('programs', opts(progRows), u ? u.programs : [], false, 'No programs yet.')),
       h('div', { class: 'field' }, 'Served agency', pickList('agencies', opts(agRows), u ? u.agencies : [], false, 'No agencies yet.')),
-      h('div', { class: 'full hint' }, 'Program members and agency users can see restricted incidents assigned to their program or serving their agency. ',
-        'Agency users also get a “Serving” panel on their dashboard. Use role “viewer” for agency staff who should only watch.'));
+      h('div', { class: 'field full' }, '★ Program admin for', pickList('program_admin', opts(progRows), u ? u.program_admin : [], false, 'No programs yet.'),
+        h('span', { class: 'hint' }, 'A program admin can edit that program, its incidents and their reports and check-ins, and manage who is in the program. Ticking one here also adds them to the program.')),
+      h('div', { class: 'full hint' }, 'Who can change what: anyone can edit what they submitted; program admins can edit everything in their program; ',
+        'server admins (role “admin”) can edit everything, and are the only ones who create programs and agencies. ',
+        'Program members and agency users can see restricted incidents assigned to their program or serving their agency. Use role “viewer” for agency staff who should only watch.'));
     const err = h('div', { class: 'err' });
     const close = modal(u ? 'Edit user' : 'New user', [f, err], [
       u ? h('button', { class: 'danger left', onclick: async () => {
@@ -896,7 +986,9 @@ VIEWS.admin = async (root) => {
       h('button', { onclick: () => close() }, 'Cancel'),
       h('button', { class: 'primary', onclick: async () => {
         const b = { display_name: f.elements.display_name.value, callsign: f.elements.callsign.value, role: f.elements.role.value,
-          programs: pickValue(f.querySelector('[data-pick=programs]')), agencies: pickValue(f.querySelector('[data-pick=agencies]')) };
+          programs: pickValue(f.querySelector('[data-pick=programs]')), agencies: pickValue(f.querySelector('[data-pick=agencies]')),
+          program_admin: pickValue(f.querySelector('[data-pick=program_admin]')) };
+        b.programs = [...new Set([...b.programs, ...b.program_admin])];  // a program admin is also a member
         if (f.elements.password.value) b.password = f.elements.password.value;
         try {
           if (u) { b.active = f.elements.active.value === '1'; await api('PUT', 'users/' + u.id, b); }
@@ -918,7 +1010,7 @@ VIEWS.admin = async (root) => {
           h('tbody', {}, users.map((u) => h('tr', { class: 'click', onclick: () => userForm(u) },
             h('td', {}, u.username, h('div', { class: 'muted' }, u.display_name || '')), h('td', { class: 'mono' }, u.callsign || ''),
             h('td', {}, u.role),
-            h('td', {}, refNames(progRows, u.programs), u.agencies && u.agencies.length ? h('div', { class: 'muted' }, '🏛 ', refNames(agRows, u.agencies)) : null),
+            h('td', {}, refNames(progRows, u.programs), u.program_admin && u.program_admin.length ? h('div', { class: 'muted' }, '★ admin of ', refNames(progRows, u.program_admin)) : null, u.agencies && u.agencies.length ? h('div', { class: 'muted' }, '🏛 ', refNames(agRows, u.agencies)) : null),
             h('td', {}, u.active ? badge('active') : badge('inactive')), h('td', { class: 'muted' }, u.last_login ? ago(u.last_login) : 'never')))))))),
     h('div', { class: 'card' }, h('h3', {}, 'Audit log (latest 200)'),
       h('div', { class: 'table-wrap', style: 'max-height:70vh;overflow:auto' }, h('table', { class: 'data' },
