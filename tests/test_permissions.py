@@ -214,6 +214,24 @@ try:
     check("bad station IDs are refused", vw.call("PUT", "me/prefs", {"wx_station": "../etc"})[0] == 400)
     check("bad station lookup refused", vw.call("GET", "weather/station?id=../x")[0] == 400)
 
+    # link previews (Facebook etc.): Open Graph tags on the main page, image public
+    def page(host=None):
+        req = urllib.request.Request(f"http://127.0.0.1:{PORT}/", headers={"User-Agent": "facebookexternalhit/1.1",
+                                                                         **({"Host": host} if host else {})})
+        with urllib.request.urlopen(req) as r:
+            return r.read().decode()
+    html = page("taciss.example.org")
+    check("og:image is an absolute address on this host",
+          'property="og:image" content="http://taciss.example.org/static/share.png?v=1"' in html, html[:600])
+    check("og:title uses the site name and subtitle", 'property="og:title" content="TACISS - Tactical Amateur Communication' in html)
+    check("large-image card for Twitter/Discord", 'name="twitter:card" content="summary_large_image"' in html)
+    html = page('evil.example"><script>alert(1)</script>')
+    check("a malicious Host header can't inject markup", "<script>alert(1)</script>" not in html)
+    with urllib.request.urlopen(f"http://127.0.0.1:{PORT}/static/share.png") as r:
+        img = r.read()
+        check("share image is public, 1200x630 PNG", r.status == 200 and img[:8] == b"\x89PNG\r\n\x1a\n"
+              and int.from_bytes(img[16:20], "big") == 1200 and int.from_bytes(img[20:24], "big") == 630)
+
     # program rosters
     _, me = padm.call("GET", "me")
     check("/me lists program_admin", me["user"]["program_admin"] == [P1], me["user"])

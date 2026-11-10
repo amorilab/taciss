@@ -66,6 +66,8 @@ CONFIG = {
     # GitHub repo for `taciss update` and the "new version available" notice; 0 turns the daily check off.
     "repo": os.environ.get("TACISS_REPO", "amorilab/taciss"),
     "update_check": env_bool("TACISS_UPDATE_CHECK", True),
+    # Public address (e.g. https://taciss.com) used in link previews on Facebook and other sites.
+    "public_url": os.environ.get("TACISS_PUBLIC_URL", "").strip().rstrip("/"),
     # APRS-IS live feed (also needs aprs_enabled=1 in settings); 0 keeps the server off APRS-IS entirely.
     "aprs": env_bool("TACISS_APRS", True),
 }
@@ -3650,6 +3652,36 @@ class Handler(BaseHTTPRequestHandler):
                 self.con.close()
 
     # ---- static -----------------------------------------------------------
+    def public_base(self):
+        """https://taciss.com style address of this server, for link previews (TACISS_PUBLIC_URL wins)."""
+        if CONFIG["public_url"]:
+            return CONFIG["public_url"]
+        host = (self.headers.get("X-Forwarded-Host") if CONFIG["trust_proxy"] else None) or self.headers.get("Host") or ""
+        host = host.split(",")[0].strip()
+        if not re.fullmatch(r"[A-Za-z0-9.-]+(:\d{1,5})?|\[[0-9a-fA-F:]+\](:\d{1,5})?", host):
+            host = f"{CONFIG['host']}:{CONFIG['port']}"
+        return f"{'https' if self.is_https() else 'http'}://{host}"
+
+    def share_tags(self):
+        """Open Graph / Twitter tags so Facebook, Messenger, Discord, Slack, etc. show a preview card."""
+        import html as _html
+        s = FeedService.settings()
+        name = s.get("site_name") or "TACISS"
+        title = f"{name} - {s.get('org_name')}" if s.get("org_name") else name
+        desc = ("Incident and information sharing for ARES, RACES, Skywarn, CERT and AUXCOMM groups: incidents, "
+                "net check-ins, reports, NWS weather, APRS and MeshCore on one board.")
+        base = self.public_base()
+        e = lambda v: _html.escape(str(v), quote=True)
+        image = f"{base}/static/share.png?v=1"
+        tags = [("name", "description", desc), ("property", "og:type", "website"), ("property", "og:site_name", name),
+                ("property", "og:title", title), ("property", "og:description", desc), ("property", "og:url", base + "/"),
+                ("property", "og:image", image), ("property", "og:image:secure_url", image) if image.startswith("https") else None,
+                ("property", "og:image:type", "image/png"), ("property", "og:image:width", "1200"),
+                ("property", "og:image:height", "630"), ("property", "og:image:alt", f"{name} logo"),
+                ("name", "twitter:card", "summary_large_image"), ("name", "twitter:title", title),
+                ("name", "twitter:description", desc), ("name", "twitter:image", image)]
+        return "".join(f'<meta {k}="{e(n)}" content="{e(v)}">\n' for k, n, v in filter(None, tags))
+
     def serve_static(self, path):
         if path in ("/", "") or not path.startswith("/static/"):
             # SPA: any non-API, non-static path serves the app shell
@@ -3664,6 +3696,8 @@ class Handler(BaseHTTPRequestHandler):
             ctype += "; charset=utf-8"
         with open(full, "rb") as fh:
             data = fh.read()
+        if rel == "index.html":
+            data = data.replace(b"</head>", self.share_tags().encode() + b"</head>", 1)
         self.send_response(200)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))

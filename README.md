@@ -338,6 +338,18 @@ The **MeshCore** tab shows the MeshCore LoRa mesh around you, as seen by interne
 
 Everything here needs internet on the TACISS server and is fetched only when someone opens the tab. Turn the tab off with **MeshCore tab on/off** = 0.
 
+## Link previews (Facebook, Messenger, Discord, Slack)
+
+When someone shares your TACISS address, sites like Facebook show a preview card with the TACISS badge, name and a short description. TACISS adds the standard Open Graph tags to its main page, with a 1200×630 share image (`app/static/share.png`).
+
+For a public server, set its public address in `/etc/taciss/taciss.env` so previews always use the right link, then restart (`sudo systemctl restart taciss`):
+
+```
+TACISS_PUBLIC_URL=https://taciss.com
+```
+
+Facebook caches previews. After changing anything, paste the address into the [Facebook Sharing Debugger](https://developers.facebook.com/tools/debug/) and click **Scrape Again**.
+
 ## Incident debrief kit
 
 When an incident is **closed**, its page shows a **📄 Debrief kit (PDF)** button. It downloads one PDF packet with everything recorded for that incident:
